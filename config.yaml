@@ -1,0 +1,28 @@
+
+num_workers: 16
+
+train:
+  max_epochs: 1000
+  batch_size: 16
+  lr: 1.0e-4
+  step_size: 250
+  gamma: 0.1
+  weight_decay: 1.0e-5
+  loss_kwargs:
+    type: "geco" # "elbo"
+    top_k_percentage: 0.02
+    deterministic_top_k: False
+    kappa: 0.55
+    decay: 0.99
+    rate: 1.0e-2
+    beta: 10 # 1
+
+test:
+  mc_n: 128
+  batch_size: 128
+  uncertainty_th: [0.25, 0.5, 0.75]
+
+model:
+  latent_dims: [4,1,1,1]
+  in_channels: 3
+  num_classes: 2
