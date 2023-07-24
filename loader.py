@@ -9,20 +9,29 @@ from albumentations.pytorch import ToTensorV2
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import functools
+from patchify import patchify
 
 image_size = 256
 
 train_transforms = A.Compose(
     [
-        A.HorizontalFlip(),
-        A.Rotate(limit=180),
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
         A.GaussNoise(p=0.5),
         A.OneOf([A.MotionBlur(blur_limit=15, p=0.2), A.MedianBlur(blur_limit=15, p=0.1), A.Blur(blur_limit=15, p=0.1)], p=0.5),
-        A.OneOf([A.GridDistortion(), A.ElasticTransform(), A.OpticalDistortion()], p=0.5),
-        A.Perspective(),
         A.RandomBrightnessContrast(),
         A.RandomGamma(),
-        A.RandomResizedCrop(image_size, image_size, scale=(0.5, 1)),
+        A.Perspective(),
+        A.OneOf(
+            [
+                A.GridDistortion(border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
+                A.ElasticTransform(border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
+                A.OpticalDistortion(border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
+            ],
+            p=0.5,
+        ),
+        A.ShiftScaleRotate(border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
+        A.Resize(image_size, image_size),
         A.Normalize(mean=(0.4379, 0.5198, 0.6954), std=(0.1190, 0.1178, 0.1243)),
         ToTensorV2(),
     ]
@@ -32,19 +41,34 @@ test_transforms = A.Compose(
     [A.Resize(image_size, image_size), A.Normalize(mean=(0.4379, 0.5198, 0.6954), std=(0.1190, 0.1178, 0.1243)), ToTensorV2()]
 )
 
+
 class CustomDataset(Dataset):
-    def __init__(self, root: str, transforms=test_transforms):
+    def __init__(self, root: str):
         self.root = root
         self.imgs = sorted(os.listdir(root))
-        self.transforms = transforms
+        self.patch_size = 578 * 2
 
     def __getitem__(self, idx):
         file_name = self.imgs[idx]
-        img = cv2.imread(os.path.join(self.root, file_name))
+        ori_img = cv2.imread(os.path.join(self.root, file_name))
+        re_h = int(ori_img.shape[0] // (self.patch_size / 2) * 128)
+        re_w = int(ori_img.shape[1] // (self.patch_size / 2) * 128)
+        ori_img = cv2.resize(ori_img, (re_w, re_h))
+
+        mask = (ori_img[:, :, 0] >= 250) & (ori_img[:, :, 1] >= 250) & (ori_img[:, :, 2] >= 250)
+        mask = np.stack((mask, mask, mask), axis=-1)
+        ori_img[mask] = 0
+
+        transforms = A.Compose([A.Normalize(mean=(0.4379, 0.5198, 0.6954), std=(0.1190, 0.1178, 0.1243))])
+        img = transforms(image=ori_img)["image"]
+
+        patches = patchify(np.transpose(img, (2, 0, 1)), (3, 256, 256), step=128)
+
         sample = {
-            "transformed":self.transforms(image=cv2.resize(img, (512, 512)))['image'],
-            'ori_img':img,
-            'file_name':file_name.split('.')[0] + '.png'
+            "patches": patches,
+            "ori_img": ori_img,
+            "file_name": file_name.split(".")[0] + ".png",
+            "mask": mask
         }
         return sample
 
@@ -73,11 +97,9 @@ class AtopyDataset(Dataset):
             masks.append(mask)
 
         transformed = self.transforms(image=img, masks=masks)
-        one_hot = np.zeros(4, dtype=np.float32)
-        one_hot[self.grades[idx]] = 1.0
         masks = np.stack(transformed["masks"], axis=0)
-        masks = np.stack([1 - masks, masks], axis=1) # background / target
-        return masks, transformed["image"], one_hot
+        masks = np.stack([1 - masks, masks], axis=1)  # background / target
+        return masks, transformed["image"], self.grades[idx], img
 
     def __len__(self):
         return len(self.imgs)
@@ -125,13 +147,23 @@ if __name__ == "__main__":
     # for phase in ["Atopy_Segment_Train", "Atopy_Segment_Test", "Atopy_Segment_Extra"]:
     #     get_file_list(phase)
 
-    cols = 5
+    cols = 10
     total_num_samples, imgs, masks, classes, grades = get_file_list("Atopy_Segment_Train")
     dataset = AtopyDataset(imgs, masks, classes, grades, train_transforms)
     train_aug = A.Compose([t for t in train_transforms if not isinstance(t, (A.Normalize, ToTensorV2))])
     test_aug = A.Compose([t for t in test_transforms if not isinstance(t, (A.Normalize, ToTensorV2))])
 
-    fig, ax = plt.subplots(nrows=1, ncols=cols, figsize=(64, 32))
+    mean_h, mean_w = 0, 0
+    for i in tqdm(range(len(dataset))):
+        img = cv2.imread(dataset.imgs[i])
+        h, w = img.shape[:2]
+        mean_h += h
+        mean_w += w
+    mean_h /= len(dataset)
+    mean_w /= len(dataset)
+    print(f"mean size : ({mean_h}, {mean_w})")
+
+    fig, ax = plt.subplots(nrows=1, ncols=cols, figsize=(64, 16))
     for i in range(cols):
         idx = random.randint(0, len(dataset))
 
@@ -140,7 +172,7 @@ if __name__ == "__main__":
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
         masks = []
-        for labeller in ['동현', '재성']:
+        for labeller in ["동현", "재성"]:
             mask = cv2.imread(os.path.join("data/train/labels", labeller, dataset.masks[idx]), 0)
             mask = cv2.resize(mask, (512, 512))
             mask[mask != 0] = 1
@@ -150,13 +182,13 @@ if __name__ == "__main__":
         mask1, mask2 = before["masks"]
         mask1 = np.stack([mask1, mask1, mask1], axis=-1) * 255
         mask2 = np.stack([mask2, mask2, mask2], axis=-1) * 255
-        before = np.concatenate([before['image'], mask1, mask2], axis=0)
+        before = np.concatenate([before["image"], mask1, mask2], axis=0)
 
         after = train_aug(image=img, masks=masks)
         mask1, mask2 = after["masks"]
         mask1 = np.stack([mask1, mask1, mask1], axis=-1) * 255
         mask2 = np.stack([mask2, mask2, mask2], axis=-1) * 255
-        after = np.concatenate([after['image'], mask1, mask2], axis=0)
+        after = np.concatenate([after["image"], mask1, mask2], axis=0)
 
         img = np.concatenate([before, after], axis=1)
 

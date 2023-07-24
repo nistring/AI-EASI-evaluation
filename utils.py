@@ -6,59 +6,42 @@ import sys
 import os
 import yaml
 from easydict import EasyDict as edict
+import pickle
 
 def load_config(path):
     with open(path) as f:
         config = edict(yaml.load(f, Loader=yaml.FullLoader))
         return config
 
-def draw_contours(img, prediction, uncertainty, grade, scale, thresholds):
-    for th, color in zip(thresholds, [(0, 0, 255), (0, 128, 255), (0, 255, 255)]):
-        mask = prediction * (uncertainty < th).astype(np.uint8)
-        mask = cv2.GaussianBlur(mask, (int(scale * 8) * 2 + 1, int(scale * 8) * 2 + 1), 0) >= 0.5
-        contours, hierarchy = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(img, contours, -1, color=color, thickness=int(scale * 2))
-    cv2.putText(
-        img,
-        f"class {grade}",
-        (int(25 * scale), int(25 * scale)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        scale,
-        (0, 255, 0),
-        int(scale * 2),
-        cv2.LINE_AA,
-    )
-    return img
+def draw_contours(img, prediction, certainty, weighted_mean:np.ndarray, scale=0.5, roi=None):
 
+    if roi is None:
+        roi = np.ones_like(prediction)
 
-def visualize(img, width, height, path):
-    img = cv2.resize(
-        (img * 255).type(torch.uint8).cpu().numpy(),
-        (width, height),
-        interpolation=cv2.INTER_CUBIC,
-    )
-    cv2.imwrite(path, img)
-    return img.astype(np.float32) / 255
+    # Certain
+    mask = prediction & certainty & roi
+    min_area = mask[roi].mean()
+    min_easi = weighted_mean[mask].mean() * area_score(min_area) * 4
+    mask = cv2.GaussianBlur(mask.astype(np.uint8), (int(scale * 8) * 2 + 1, int(scale * 8) * 2 + 1), 0) >= 0.5
+    contours, hierarchy = cv2.findContours(mask.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(img, contours, -1, color=(0, 0, 255), thickness=int(scale * 2))
+
+    # Certain + uncertain
+    mask = (~(~prediction & ~certainty)) & roi
+    max_area = mask[roi].mean()
+    max_easi = weighted_mean[mask].mean() * area_score(max_area) * 4
+    mask = cv2.GaussianBlur(mask.astype(np.uint8), (int(scale * 8) * 2 + 1, int(scale * 8) * 2 + 1), 0) >= 0.5
+    contours, hierarchy = cv2.findContours(mask.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(img, contours, -1, color=(0, 255, 255), thickness=int(scale * 2))
+
+    return img, (min_area * 100, max_area * 100), (min_easi, max_easi)
 
 
 def normalize_uncertainty(uncertainty):
-    if uncertainty.mean() == 0.0:
-        return uncertainty
-    else:
-        return torch.clamp(uncertainty / 2 / uncertainty.mean(), 0, 1)
-
-
-def quantify_uncertainty(preds):
-    mean = torch.zeros_like(preds)
-    mean[preds >= 0.5] = 1.0
-    std = mean.std(0)
-    mean = mean.mean(0)
-
-    entropy = preds.mean(0)
-    entropy = -(entropy * torch.log(entropy) + (1 - entropy) * torch.log(1 - entropy))
-
-    mutual_information = entropy - (preds * torch.log(preds) + (1 - preds) * torch.log(1 - preds)).mean(0)
-    return mean, std, entropy, mutual_information
+    uncertainty -= uncertainty.min()
+    if uncertainty.max() != 0:
+        uncertainty /= uncertainty.max()
+    return uncertainty
 
 
 def eval_perform(df, labels, predictions, binary_unc_map, grades, cohens_k):
@@ -92,6 +75,14 @@ def eval_perform(df, labels, predictions, binary_unc_map, grades, cohens_k):
     )
 
     return pd.concat([df, results], axis=0)
+
+def area_score(area:float):
+    if area < 0.1:
+        return 10 * area
+    elif area < 0.9:
+        return 1 + 5 * (area - 0.1)
+    else:
+        return 5 + 10 * (area - 0.9)
 
 def create_dir(phase):
     root = 'results' if phase == 'test' else 'vis'

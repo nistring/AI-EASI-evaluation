@@ -19,10 +19,10 @@ from sklearn.metrics import cohen_kappa_score
 import pandas as pd
 from copy import deepcopy
 from datetime import datetime
+from tqdm import tqdm
 
 from loader import get_dataset, CustomDataset
 from model.model import HierarchicalProbUNet
-from model.multitask_model import MultiTaskHPU
 from utils import *
 
 
@@ -77,7 +77,7 @@ class LitModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
-        seg, img, grade = batch
+        seg, img, grade, _ = batch
         for i in range(seg.shape[1]):
             loss_dict = self.model.sum_loss(seg[:, i], img, grade)
             loss = loss_dict["supervised_loss"]
@@ -89,9 +89,9 @@ class LitModel(pl.LightningModule):
 
             self.log_dict(
                 {
-                    "train_loss": loss,
                     "train_rec_per_pixel": summaries["ma_rec_loss_mean"],
                     "train_lagmul": summaries["lagmul"],
+                    "train_cls_per_instance": summaries["cls_loss_mean"],
                     "train_kl_sum": summaries["kl_sum"],
                     "train_kl_0": summaries["kl_0"],
                     "train_kl_1": summaries["kl_1"],
@@ -99,9 +99,9 @@ class LitModel(pl.LightningModule):
                     "train_kl_3": summaries["kl_3"],
                 }
             )
-`
+
     def validation_step(self, batch, batch_idx):
-        seg, img, grade = batch
+        seg, img, grade, _ = batch
         for i in range(seg.shape[1]):
             loss_dict = self.model.sum_loss(seg[:, i], img, grade)
             loss = loss_dict["supervised_loss"]
@@ -109,9 +109,9 @@ class LitModel(pl.LightningModule):
 
             self.log_dict(
                 {
-                    "val_loss": loss,
                     "val_rec_per_pixel": summaries["ma_rec_loss_mean"],
                     "val_lagmul": summaries["lagmul"],
+                    "val_cls_per_instance": summaries["cls_loss_mean"],
                     "val_kl_sum": summaries["kl_sum"],
                     "val_kl_0": summaries["kl_0"],
                     "val_kl_1": summaries["kl_1"],
@@ -125,119 +125,138 @@ class LitModel(pl.LightningModule):
         b, c, w, h = img.shape
         img = img.expand(self.cfg.test.batch_size, c, w, h)
 
-        preds, grade = self.model.sample(img, self.mc_n // self.cfg.test.batch_size)
+        preds, grades = self.model.sample(img, self.mc_n // self.cfg.test.batch_size)
 
-        return quantify_uncertainty(preds), grade
+        mean = torch.zeros_like(preds)
+        mean[preds >= 0.5] = 1.0
+
+        weighted_mean = (mean * grades).mean(0)
+        std = mean.std(0)
+        mean = mean.mean(0)
+
+        entropy = preds.mean(0)
+        entropy = -(entropy * torch.log(entropy) + (1 - entropy) * torch.log(1 - entropy))
+
+        mutual_information = entropy + (preds * torch.log(preds) + (1 - preds) * torch.log(1 - preds)).mean(0)
+
+        return mean, weighted_mean, std, entropy, mutual_information, grades.reshape(-1)
 
     def on_test_start(self):
         self.logger.log_hyperparams(dict(self.cfg.test))
-        df = pd.DataFrame(
-            {
-                "ac_2": [],
-                "au_2": [],
-                "ic_2": [],
-                "iu_2": [],
-                "c_1": [],
-                "u_1": [],
-                "ac_0": [],
-                "au_0": [],
-                "ic_0": [],
-                "iu_0": [],
-                "n_gt_2": [],
-                "n_gt_1": [],
-                "n_gt_0": [],
-                "grade": [],
-                "pred": [],
-                "match": [],
-                "cohen's k": [],
-            }
-        )
-        self.results = {"std": df, "entropy": df.copy(deep=True), "mutual_information": df.copy(deep=True)}
+
+        self.img = []
+        self.gt = []
+        self.gt_grade = []
+        self.mean = []
+        self.weighted_mean = []
+        self.std = []
+        self.entropy = []
+        self.mi = []
+        self.grade = []
+        self.cohens_k = []
 
     def test_step(self, batch, batch_idx):
+        seg, img, gt_grade, ori_img = batch
 
-        seg, img, gt_grade = batch
+        seg = seg[0].bool().cpu().numpy()
+        gt = np.ones_like(seg[0, 0], dtype=np.uint8)
+        gt[seg[0, 1] * seg[1, 1]] = 2
+        gt[seg[0, 0] * seg[1, 0]] = 0
 
-        seg = seg[0].bool().cpu()
-
-        # accurate & certain; where two raters consented being accurate
-        gt_2 = seg[0, 1] * seg[1, 1]
-        # inaccurate & certain; where two raters consented being accurate
-        gt_0 = seg[0, 0] * seg[1, 0]
-        # uncertain; where two raters didn't consent
-        gt_1 = (~gt_2) * (~gt_0)
-
-        seg = seg.reshape((2, -1)).numpy()
+        seg = seg.reshape((2, -1))
         cohens_k = cohen_kappa_score(seg[0], seg[1])
 
         # Sampling
-        (mean, std, entropy, mutual_information), grade = self.test_or_predict(img)
+        mean, weighted_mean, std, entropy, mi, grade = self.test_or_predict(img)
 
-        # Binarize
-        mean = (mean >= 0.5).cpu()
-        std = (std >= std.mean()).cpu()
-        entropy = (entropy >= entropy.mean()).cpu()
-        mutual_information = (mutual_information >= mutual_information.mean()).cpu()
-
-        gt_grade = torch.argmax(gt_grade[0]).item()
-        grade = gt_grade if grade is None else torch.argmax(grade[0]).item()
-
-        self.results["std"] = eval_perform(self.results["std"], (gt_2, gt_1, gt_0), mean, std, (gt_grade, grade), cohens_k)
-        self.results["entropy"] = eval_perform(self.results["entropy"], (gt_2, gt_1, gt_0), mean, entropy, (gt_grade, grade), cohens_k)
-        self.results["mutual_information"] = eval_perform(
-            self.results["mutual_information"], (gt_2, gt_1, gt_0), mean, mutual_information, (gt_grade, grade), cohens_k
-        )
+        self.img.append(ori_img.cpu().numpy())
+        self.gt.append(gt)
+        self.gt_grade.append(gt_grade.cpu().numpy())
+        self.mean.append(mean.cpu().numpy())
+        self.weighted_mean.append(weighted_mean.cpu().numpy())
+        self.std.append(std.cpu().numpy())
+        self.entropy.append(entropy.cpu().numpy())
+        self.mi.append(mi.cpu().numpy())
+        self.grade.append(grade.cpu().numpy())
+        self.cohens_k.append(cohens_k)
 
     def on_test_end(self):
-        self.results["std"].to_csv(f"results/{self.exp_name}/std.csv", index=False)
-        self.results["entropy"].to_csv(f"results/{self.exp_name}/entropy.csv", index=False)
-        self.results["mutual_information"].to_csv(f"results/{self.exp_name}/mutual_information.csv", index=False)
+        results = {
+            "img": np.concatenate(self.img, axis=0),
+            "gt": np.stack(self.gt, axis=0),
+            "gt_grade": np.concatenate(self.gt_grade, axis=0),
+            "mean": np.stack(self.mean, axis=0),
+            "weighted_mean": np.stack(self.weighted_mean, axis=0),
+            "std": np.stack(self.std, axis=0),
+            "entropy": np.stack(self.entropy, axis=0),
+            "mi": np.stack(self.mi, axis=0),
+            "grade": np.stack(self.grade, axis=0),
+            "cohens_k": np.stack(self.cohens_k, axis=0),
+        }
+        with open(f"results/{self.exp_name}/results.pickle", "wb") as f:
+            pickle.dump(results, f)
 
     def on_predict_start(self):
-        self.logger.log_hyperparams(dict(self.cfg.test))
-        for dir in ["entropy", "mutual_information", "prediction", "segmentation", "std"]:
-            os.makedirs(f"vis/{self.exp_name}/{dir}")
-        for dir in ["entropy", "mutual_information", "std"]:
-            os.makedirs(f"vis/{self.exp_name}/prediction/{dir}")
+        self.logger.log_hyperparams(dict(self.cfg.predict))
 
     def predict_step(self, batch, batch_idx):
-        img = batch["transformed"]
-        ori_img = batch["ori_img"]
+        patches = batch["patches"][0]
+        img = batch["ori_img"].cpu().numpy().astype(np.uint8)[0]
         file_name = batch["file_name"][0]
+        mask = batch["mask"][0, :, :, 0].bool().cpu().numpy()
 
-        b, c, w, h = img.shape
+        pred = np.zeros(((patches.shape[1] + 1) * 128, (patches.shape[2] + 1) * 128))
+        weighted_pred = np.zeros_like(pred)
+        uncertainty = np.zeros_like(pred)
 
-        ori_img = ori_img.cpu().numpy().astype(np.uint8)[0]
-        height, width = ori_img.shape[:2]
+        with tqdm(total=patches.shape[1] * patches.shape[2]) as pbar:
+            for i in range(patches.shape[1]):
+                for j in range(patches.shape[2]):
+                    patch = patches[:, i, j]
+                    if not torch.all(patch == 0):
+                        mean, weighted_mean, std, entropy, mi, grade = self.test_or_predict(patch)
+                        pred[i * 128 : i * 128 + 256, j * 128 : j * 128 + 256] += mean.cpu().numpy()
+                        weighted_pred[i * 128 : i * 128 + 256, j * 128 : j * 128 + 256] += weighted_mean.cpu().numpy()
+                        if self.cfg.predict.metric == "entropy":
+                            u = entropy
+                        elif self.cfg.predict.metric == "mi":
+                            u = mi
+                        else:
+                            u = std
+                        uncertainty[i * 128 : i * 128 + 256, j * 128 : j * 128 + 256] += u.cpu().numpy()
+                    pbar.update(1)
 
-        (mean, std, entropy, mutual_information), grade = self.test_or_predict(img)
-        grade = "None" if grade is None else torch.argmax(grade[0]).item()
+        pred[128:-128] /= 2
+        pred[:, 128:-128] /= 2
+        weighted_pred[128:-128] /= 2
+        weighted_pred[:, 128:-128] /= 2
+        uncertainty[128:-128] /= 2
+        uncertainty[:, 128:-128] /= 2
 
-        std = normalize_uncertainty(std)
-        entropy = normalize_uncertainty(entropy)
-        mutual_information = normalize_uncertainty(mutual_information)
+        # Size
+        height, width = img.shape[:2]
 
-        # Visualization
-        mean = visualize(mean, width, height, f"vis/{self.exp_name}/segmentation/{file_name}")
-        std = 1 - visualize(1 - std, width, height, f"vis/{self.exp_name}/std/{file_name}")
-        entropy = 1 - visualize(1 - entropy, width, height, f"vis/{self.exp_name}/entropy/{file_name}")
-        mutual_information = 1 - visualize(1 - mutual_information, width, height, f"vis/{self.exp_name}/mutual_information/{file_name}")
+        # Thresholding
+        pred = pred >= 0.5
+        certainty = uncertainty < uncertainty[~mask].mean() + self.cfg.predict.th * uncertainty[~mask].std()
 
-        mean = mean >= 0.5
-        scale = width / w / 2
+        # Draw contours
+        img, area, easi = draw_contours(img, pred, certainty, weighted_pred, roi=~mask)
 
-        cv2.imwrite(
-            f"vis/{self.exp_name}/prediction/std/{file_name}",
-            draw_contours(deepcopy(ori_img), mean, std, grade, scale, self.cfg.test.uncertainty_th),
+        # Text
+        cv2.putText(
+            img,
+            f"entropy(sigma={self.cfg.predict.th:.2f}); area : {area[0]:.1f}-{area[1]:.1f}, EASI : {easi[0]:.1f}-{easi[1]:.1f}",
+            (25, 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
         )
-        cv2.imwrite(
-            f"vis/{self.exp_name}/prediction/entropy/{file_name}",
-            draw_contours(deepcopy(ori_img), mean, entropy, grade, scale, self.cfg.test.uncertainty_th),
-        )
-        cv2.imwrite(
-            f"vis/{self.exp_name}/prediction/mutual_information/{file_name}",
-            draw_contours(deepcopy(ori_img), mean, mutual_information, grade, scale, self.cfg.test.uncertainty_th),
-        )
+
+        os.makedirs("results/predict", exist_ok=True)
+        cv2.imwrite(os.path.join("results/predict", file_name), img)
 
 
 if __name__ == "__main__":
@@ -246,7 +265,6 @@ if __name__ == "__main__":
     parser.add_argument("--devices", type=int, default=3)
     parser.add_argument("--phase", type=str, choices=["train", "test", "predict"])
     parser.add_argument("--checkpoint", type=str, help="Path to checkpoint")
-    parser.add_argument("--multi", action="store_true", help="Use multi-task u-net model")
     parser.add_argument("--cfg", type=str, default="config.yaml")
     args = parser.parse_args()
     cfg = load_config(args.cfg)
@@ -257,24 +275,16 @@ if __name__ == "__main__":
     atopy = AtopyDataModule(cfg)
 
     # model
-    if args.multi:
-        model = MultiTaskHPU(
-            latent_dims=cfg.model.latent_dims,
-            in_channels=cfg.model.in_channels,
-            num_classes=cfg.model.num_classes,
-            loss_kwargs=dict(cfg.train.loss_kwargs),
-        )
-    else:
-        model = HierarchicalProbUNet(
-            in_channels=cfg.model.in_channels,
-            num_classes=cfg.model.num_classes,
-            loss_kwargs=dict(cfg.train.loss_kwargs),
-        )
+    model = HierarchicalProbUNet(
+        in_channels=cfg.model.in_channels,
+        num_classes=cfg.model.num_classes,
+        loss_kwargs=dict(cfg.train.loss_kwargs),
+    )
 
     # train
     if args.phase == "train":
         litmodel = LitModel(model, cfg=cfg)
-        checkpoint_callback = ModelCheckpoint(monitor="val_loss")
+        checkpoint_callback = ModelCheckpoint(monitor="val_kl_sum")
         trainer = pl.Trainer(
             max_epochs=cfg.train.max_epochs,
             devices=args.devices,

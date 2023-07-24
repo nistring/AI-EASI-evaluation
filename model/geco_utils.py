@@ -34,21 +34,6 @@ class MovingAverage(nn.Module):
         return inputs + (self._moving_average - inputs).detach()
 
 
-class LagrangeMultiplier(nn.Module):
-    """
-    Refer to https://github.com/deepmind/sonnet/blob/v1/sonnet/python/modules/optimization_constraints.py
-    """
-
-    def __init__(self, rate=1e-2, name="lagrange_multiplier"):
-        super(LagrangeMultiplier, self).__init__()
-        self.lambda_var = nn.Parameter(torch.Tensor([1.0]))
-        self.lambda_var .register_hook(lambda grad: -grad * rate)
-        self.softplus = nn.Softplus()
-
-    def forward(self):
-        return self.softplus(self.lambda_var) ** 2
-
-
 def _sample_gumbel(shape, eps=1e-20):
     return -torch.log(-torch.log(shape.uniform_(0, 1) + eps) + eps)
 
