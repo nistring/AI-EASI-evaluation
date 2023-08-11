@@ -15,12 +15,8 @@ if __name__ == "__main__":
     parser.add_argument("--mi-th", type=float, default=0.0, help="Threshold for mutual information metric in z score")
     args = parser.parse_args()
 
-    # make vis directory
-    root = os.path.join("results", args.exp_name)
-    os.makedirs(os.path.join(root, "vis"), exist_ok=True)
-
     # load results
-    with open(os.path.join(root, "results.pickle"), "rb") as f:
+    with open(os.path.join("results", args.exp_name, "results.pickle"), "rb") as f:
         results = pickle.load(f)
 
     print(f"Visualize {args.exp_name}")
@@ -58,7 +54,7 @@ if __name__ == "__main__":
 
         # Thresholding
         mean_mask = mean >= 0.5
-        std_mask = std > std.mean() - args.std_th * std.std()
+        std_mask = std >= std.mean() - args.std_th * std.std()
         entropy_mask = entropy > entropy.mean() - args.entropy_th * entropy.std()
         mi_mask = mi > mi.mean() - args.mi_th * mi.std()
 
@@ -146,4 +142,4 @@ if __name__ == "__main__":
         )
 
         # Write
-        cv2.imwrite(os.path.join(root, "vis", str(i).zfill(4) + ".png"), img)
+        cv2.imwrite(os.path.join("results", args.exp_name, "vis", str(i).zfill(4) + ".png"), img)

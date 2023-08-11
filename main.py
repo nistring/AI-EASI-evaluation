@@ -122,8 +122,8 @@ class LitModel(pl.LightningModule):
             )
 
     def test_or_predict(self, img):
-        b, c, w, h = img.shape
-        img = img.expand(self.cfg.test.batch_size, c, w, h)
+        b, c, h, w = img.shape
+        img = img.expand(self.cfg.test.batch_size, c, h, w)
 
         preds, grades = self.model.sample(img, self.mc_n // self.cfg.test.batch_size)
 
@@ -276,6 +276,7 @@ if __name__ == "__main__":
 
     # model
     model = HierarchicalProbUNet(
+        latent_dims=cfg.model.latent_dims,
         in_channels=cfg.model.in_channels,
         num_classes=cfg.model.num_classes,
         loss_kwargs=dict(cfg.train.loss_kwargs),

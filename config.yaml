@@ -9,9 +9,9 @@ train:
   weight_decay: 1.0e-5
   loss_kwargs:
     type: "geco" # "elbo"
-    top_k_percentage: 0.02
+    top_k_percentage: 0.14 # 0.273 # 1 - cohen's kappa
     deterministic_top_k: False
-    kappa: 0.60
+    kappa: 0.10
     decay: 0.99
     rate: 1.0e-2
     beta: 1 # 10
@@ -25,5 +25,6 @@ predict:
   th: 1.0
 
 model:
+  latent_dims: [4,1,1,1]
   in_channels: 3
   num_classes: 2

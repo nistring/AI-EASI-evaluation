@@ -113,12 +113,14 @@ class _HierarchicalCore(nn.Module):
                 dist = Independent(norm, 1)
                 distributions.append(dist)
 
-                if z_q is not None:
-                    z = z_q[i]
-                elif mean[i]:
+                z = dist.sample()
+
+                if mean:
                     z = dist.mean
-                else:
-                    z = dist.sample()
+
+                if z_q is not None:
+                    if i < len(z_q):
+                        z = z_q[i]
 
                 used_latents.append(z)
                 self.decoder_output_lo = torch.concat([z, decoder_features], dim=1)
@@ -323,8 +325,8 @@ class HierarchicalProbUNet(nn.Module):
 
     def cls_loss(self, grade):
         p = self._p_sample_z_q["distributions"][0]
-        mean = p.mean.reshape(-1)
-        var = p.variance.reshape(-1)
+        mean = p.mean.reshape(grade.shape)
+        var = p.variance.reshape(grade.shape)
         loss = 0.5 * ((grade - mean) ** 2 / var + torch.log(var))
         loss = {"mean": loss.mean(), "sum": loss.sum()}
         return loss

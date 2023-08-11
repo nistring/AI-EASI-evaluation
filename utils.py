@@ -18,18 +18,18 @@ def draw_contours(img, prediction, certainty, weighted_mean:np.ndarray, scale=0.
     if roi is None:
         roi = np.ones_like(prediction)
 
-    # Certain
+    # True & Certain
     mask = prediction & certainty & roi
     min_area = mask[roi].mean()
-    min_easi = weighted_mean[mask].mean() * area_score(min_area) * 4
+    min_easi = weighted_mean[mask].sum() / mask.sum() * area_score(min_area) * 4
     mask = cv2.GaussianBlur(mask.astype(np.uint8), (int(scale * 8) * 2 + 1, int(scale * 8) * 2 + 1), 0) >= 0.5
     contours, hierarchy = cv2.findContours(mask.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(img, contours, -1, color=(0, 0, 255), thickness=int(scale * 2))
 
-    # Certain + uncertain
-    mask = (~(~prediction & ~certainty)) & roi
+    # Only Certain
+    mask = prediction & roi
     max_area = mask[roi].mean()
-    max_easi = weighted_mean[mask].mean() * area_score(max_area) * 4
+    max_easi = weighted_mean[mask].sum() / mask.sum() * area_score(max_area) * 4
     mask = cv2.GaussianBlur(mask.astype(np.uint8), (int(scale * 8) * 2 + 1, int(scale * 8) * 2 + 1), 0) >= 0.5
     contours, hierarchy = cv2.findContours(mask.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(img, contours, -1, color=(0, 255, 255), thickness=int(scale * 2))
