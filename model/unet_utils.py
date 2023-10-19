@@ -78,7 +78,7 @@ class Resize_up(nn.Module):
         super(Resize_up, self).__init__()
         assert scale >= 1
         self.scale = scale
-        self.up = nn.Upsample(scale_factor=self.scale)
+        self.up = nn.Upsample(scale_factor=self.scale, mode='bilinear', align_corners=True)
 
     def forward(self, input_features):
         return self.up(input_features)

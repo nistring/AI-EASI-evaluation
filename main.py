@@ -20,6 +20,7 @@ import pandas as pd
 from copy import deepcopy
 from datetime import datetime
 from tqdm import tqdm
+import shutil
 
 from loader import get_dataset, CustomDataset
 from model.model import HierarchicalProbUNet
@@ -68,9 +69,8 @@ class LitModel(pl.LightningModule):
         self.cfg.exp_date = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.cfg.train.lr, weight_decay=self.cfg.train.weight_decay)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=self.cfg.train.step_size, gamma=self.cfg.train.gamma)
-        return [optimizer], [scheduler]
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.cfg.train.lr, weight_decay=self.cfg.train.weight_decay, betas=(0.99, 0.9999))
+        return [optimizer]
 
     def on_train_start(self):
         self.logger.log_hyperparams(dict(self.cfg.train))
@@ -87,18 +87,7 @@ class LitModel(pl.LightningModule):
             self.manual_backward(loss)
             opt.step()
 
-            self.log_dict(
-                {
-                    "train_rec_per_pixel": summaries["ma_rec_loss_mean"],
-                    "train_lagmul": summaries["lagmul"],
-                    "train_cls_per_instance": summaries["cls_loss_mean"],
-                    "train_kl_sum": summaries["kl_sum"],
-                    "train_kl_0": summaries["kl_0"],
-                    "train_kl_1": summaries["kl_1"],
-                    "train_kl_2": summaries["kl_2"],
-                    "train_kl_3": summaries["kl_3"],
-                }
-            )
+            self.log_dict({"train_" + k: v for k, v in summaries.items()}, sync_dist=True)
 
     def validation_step(self, batch, batch_idx):
         seg, img, grade, _ = batch
@@ -107,19 +96,7 @@ class LitModel(pl.LightningModule):
             loss = loss_dict["supervised_loss"]
             summaries = loss_dict["summaries"]
 
-            self.log_dict(
-                {
-                    "val_rec_per_pixel": summaries["ma_rec_loss_mean"],
-                    "val_lagmul": summaries["lagmul"],
-                    "val_cls_per_instance": summaries["cls_loss_mean"],
-                    "val_kl_sum": summaries["kl_sum"],
-                    "val_kl_0": summaries["kl_0"],
-                    "val_kl_1": summaries["kl_1"],
-                    "val_kl_2": summaries["kl_2"],
-                    "val_kl_3": summaries["kl_3"],
-                },
-                sync_dist=True,
-            )
+            self.log_dict({"val_" + k: v for k, v in summaries.items()}, sync_dist=True)
 
     def test_or_predict(self, img):
         b, c, h, w = img.shape
@@ -262,7 +239,7 @@ class LitModel(pl.LightningModule):
 if __name__ == "__main__":
     # arguments
     parser = ArgumentParser()
-    parser.add_argument("--devices", type=int, default=3)
+    parser.add_argument("--devices", type=int, default=1)
     parser.add_argument("--phase", type=str, choices=["train", "test", "predict"])
     parser.add_argument("--checkpoint", type=str, help="Path to checkpoint")
     parser.add_argument("--cfg", type=str, default="config.yaml")
@@ -292,11 +269,13 @@ if __name__ == "__main__":
             accelerator="gpu",
             strategy="ddp_find_unused_parameters_true",
             callbacks=[checkpoint_callback],
+            log_every_n_steps=10,
         )
         if args.checkpoint:
             trainer.fit(litmodel, datamodule=atopy, ckpt_path=args.checkpoint)
         else:
             trainer.fit(litmodel, datamodule=atopy)
+        shutil.copy("config.yaml", f"{trainer.logger.log_dir}/config.yaml")
     # test
     else:
         exp_name = create_dir(args.phase)

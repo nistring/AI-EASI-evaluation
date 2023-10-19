@@ -167,3 +167,4 @@ nohup.out
 lightning_logs/
 vis/*
 augmentation.png
+*.run

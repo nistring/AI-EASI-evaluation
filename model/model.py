@@ -102,8 +102,8 @@ class _HierarchicalCore(nn.Module):
         j = 0
 
         for decoder in self.decoder:
-            decoder_features = decoder(decoder_features)
             if type(decoder) == nn.Conv2d:
+                decoder_features = decoder(decoder_features)
 
                 mu = decoder_features[::, : self._latent_dims[i]]
 
@@ -115,7 +115,7 @@ class _HierarchicalCore(nn.Module):
 
                 z = dist.sample()
 
-                if mean:
+                if mean[i]:
                     z = dist.mean
 
                 if z_q is not None:
@@ -123,12 +123,14 @@ class _HierarchicalCore(nn.Module):
                         z = z_q[i]
 
                 used_latents.append(z)
-                self.decoder_output_lo = torch.concat([z, decoder_features], dim=1)
+                decoder_output_lo = torch.concat([z, decoder_features], dim=1)
                 i += 1
-            if type(decoder) == Resize_up:
-                decoder_output_hi = decoder(self.decoder_output_lo)
+            elif type(decoder) == Resize_up:
+                decoder_output_hi = decoder(decoder_output_lo)
                 decoder_features = torch.concat([decoder_output_hi, encoder_outputs[::-1][j + 1]], dim=1)
                 j += 1
+            else:
+                decoder_features = decoder(decoder_features)
 
         return {
             "decoder_features": decoder_features,
@@ -268,67 +270,58 @@ class HierarchicalProbUNet(nn.Module):
         )
 
         self._loss_kwargs = loss_kwargs
+        # self._moving_average = geco_utils.MovingAverage(decay=self._loss_kwargs["decay"], differentiable=True)
 
         if self._loss_kwargs["type"] == "geco":
-            self._moving_average = geco_utils.MovingAverage(decay=self._loss_kwargs["decay"], differentiable=True)
             """
             Refer to https://github.com/deepmind/sonnet/blob/v1/sonnet/python/modules/optimization_constraints.py
             """
             self._lagmul = nn.Parameter(torch.Tensor([1.0]))
             self._lagmul.register_hook(lambda grad: -grad * self._loss_kwargs["rate"])
+            self._lagmul_grade = nn.Parameter(torch.Tensor([1.0]))
+            self._lagmul_grade.register_hook(lambda grad: -grad * self._loss_kwargs["rate"])
             self.softplus = nn.Softplus()
 
-    def forward(self):
-        return self.softplus(self.lambda_var) ** 2
-
-    def forward(self, seg, img):
-        inputs = (seg, img)
-        # if self._cache != inputs:
-        self._q_sample = self.posterior(torch.concat([seg, img], dim=1), mean=False)
-        self._q_sample_mean = self.posterior(torch.concat([seg, img], dim=1), mean=True)
-        self._p_sample = self.prior(img, mean=False, z_q=None)
+    def forward(self, seg, img, grade):
+        self._q_sample = self.posterior(torch.concat([seg, img], dim=1))
         self._p_sample_z_q = self.prior(img, z_q=self._q_sample["used_latents"])
-        self._p_sample_z_q_mean = self.prior(img, z_q=self._q_sample_mean["used_latents"])
-        # self._cache = inputs
         return
 
     def sample(self, img, mc_n: int, mean=False, z_q=None):
         prior_out = self.prior(img, mean, z_q)
         encoder_features = prior_out["encoder_features"]
         decoder_features = prior_out["decoder_features"]
+        # preds = torch.argmax(self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features), dim=1)
         preds = F.softmax(self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features), dim=1)[:, 1]
-        grades = prior_out["used_latents"][0].squeeze(-1)
+        grades = prior_out["used_latents"][0]
 
         for i in range(mc_n - 1):
             prior_out = self.prior(encoder_features, mean, z_q, skip_encoder=True)
             decoder_features = prior_out["decoder_features"]
             preds = torch.cat(
-                (preds, F.softmax(self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features), dim=1)[:, 1]), dim=0
+                (preds, torch.argmax(self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features), dim=1)), dim=0
             )
-            grades = torch.cat((grades, prior_out["used_latents"][0].squeeze(-1)))
+            grades = torch.cat((grades, prior_out["used_latents"][0]))
 
         return preds, grades
 
-    def reconstruct(self, seg, img, mean=False):
-        self.forward(seg, img)
-        if mean:
-            prior_out = self._p_sample_z_q_mean
-        else:
-            prior_out = self._p_sample_z_q
+    def reconstruct(self, seg, img, grade, mean=False):
+        self.forward(seg, img, grade)
+        prior_out = self._p_sample_z_q
         encoder_features = prior_out["encoder_features"]
         decoder_features = prior_out["decoder_features"]
         return self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features)
 
-    def rec_loss(self, seg, img, mask=None, top_k_percentage=None, deterministic=True):
-        reconstruction = self.reconstruct(seg, img, mean=False)
+    def rec_loss(self, seg, img, grade=None, mask=None, top_k_percentage=None, deterministic=True):
+        reconstruction = self.reconstruct(seg, img, grade, mean=False)
         return geco_utils.ce_loss(reconstruction, seg, mask, top_k_percentage, deterministic)
 
     def cls_loss(self, grade):
-        p = self._p_sample_z_q["distributions"][0]
-        mean = p.mean.reshape(grade.shape)
-        var = p.variance.reshape(grade.shape)
-        loss = 0.5 * ((grade - mean) ** 2 / var + torch.log(var))
-        loss = {"mean": loss.mean(), "sum": loss.sum()}
+        p_dist = self._p_sample_z_q["distributions"][0]
+        mean = p_dist.mean.reshape(grade.shape)
+        var = p_dist.variance.reshape(grade.shape)
+        loss = (grade - mean) ** 2 / var + torch.log(var)
+        loss = {"mean": loss.mean(), "sum": loss.sum(-1).mean()}
         return loss
 
     def kl_divergence(self, seg, img):
@@ -341,7 +334,7 @@ class HierarchicalProbUNet(nn.Module):
         kl_dict = {}
         for level, (q, p) in enumerate(zip(q_dists, p_dists)):
             kl_per_pixel = kl.kl_divergence(p, q)
-            kl_per_instance = kl_per_pixel.sum(axis=[1, 2])
+            kl_per_instance = kl_per_pixel.sum(dim=(1, 2))
             kl_dict[level] = kl_per_instance.mean()
 
         return kl_dict
@@ -350,55 +343,51 @@ class HierarchicalProbUNet(nn.Module):
         summaries = {}
         top_k_percentage = self._loss_kwargs["top_k_percentage"]
         deterministic = self._loss_kwargs["deterministic_top_k"]
-        rec_loss = self.rec_loss(seg, img, mask, top_k_percentage, deterministic)
 
+        # rec loss
+        rec_loss = self.rec_loss(seg, img, grade, mask, top_k_percentage, deterministic)
+        summaries["rec_loss_mean"] = rec_loss["mean"]
+
+        # kl loss
         kl_dict = self.kl_divergence(seg, img)
         kl_sum = torch.stack([kl for _, kl in kl_dict.items()], dim=-1).sum()
-
-        summaries["rec_loss_mean"] = rec_loss["mean"]
-        summaries["rec_loss_sum"] = rec_loss["sum"]
         summaries["kl_sum"] = kl_sum
         for level, kl in kl_dict.items():
             summaries["kl_{}".format(level)] = kl
+
+        # classification loss
+        if grade is not None:
+            cls_loss = self.cls_loss(grade)
+            summaries["cls_loss_mean"] = cls_loss["mean"]
+
+        mask_sum_per_instance = rec_loss["mask"].sum(dim=-1)
+        num_valid_pixels = mask_sum_per_instance.mean()
 
         # ELBO
         if self._loss_kwargs["type"] == "elbo":
             loss = rec_loss["sum"] + self._loss_kwargs["beta"] * kl_sum
 
-            # classification loss
             if grade is not None:
-                cls_loss = self.cls_loss(grade)
-                loss += cls_loss["sum"]
-
-                summaries["cls_loss_mean"] = cls_loss["mean"]
-                summaries["cls_loss_sum"] = cls_loss["sum"]
-                
-            summaries["elbo_loss"] = loss
-
+                loss += self._loss_kwargs["alpha"] * cls_loss["sum"]
+            
         # GECO
-        if self._loss_kwargs["type"] == "geco":
-            ma_rec_loss = self._moving_average(rec_loss["sum"])
-            mask_sum_per_instance = rec_loss["mask"].sum(dim=-1)
-            num_valid_pixels = mask_sum_per_instance.mean()
+        elif self._loss_kwargs["type"] == "geco":
             reconstruction_threshold = self._loss_kwargs["kappa"] * num_valid_pixels
-
-            rec_constraint = ma_rec_loss - reconstruction_threshold
+            rec_constraint = rec_loss["sum"] - reconstruction_threshold
             lagmul = self.softplus(self._lagmul) ** 2
             loss = lagmul * rec_constraint + kl_sum
 
-            # classification loss
             if grade is not None:
-                cls_loss = self.cls_loss(grade)
-                loss += cls_loss["sum"]
+                classification_threshold = self._loss_kwargs["kappa_grade"] * grade.shape[-1]
+                cls_constraint = self._loss_kwargs["alpha"] * (cls_loss["sum"] - classification_threshold)
+                lagmul_grade = self.softplus(self._lagmul_grade) ** 2 
+                loss += lagmul_grade * cls_constraint
 
-                summaries["cls_loss_mean"] = cls_loss["mean"]
-                summaries["cls_loss_sum"] = cls_loss["sum"]
+                summaries["lagmul_grade"] = self._lagmul_grade
 
-            summaries["geco_loss"] = loss
-            summaries["ma_rec_loss_mean"] = ma_rec_loss / num_valid_pixels
-            summaries["num_valid_pixels"] = num_valid_pixels
             summaries["lagmul"] = self._lagmul
         else:
             raise NotImplementedError("Loss type {} not implemeted!".format(self._loss_kwargs["type"]))
 
+        summaries["loss"] = loss
         return dict(supervised_loss=loss, summaries=summaries)

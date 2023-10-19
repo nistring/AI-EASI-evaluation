@@ -2,19 +2,18 @@ num_workers: 16
 
 train:
   max_epochs: 1000
-  batch_size: 16
-  lr: 1.0e-4
-  step_size: 200
-  gamma: 0.5
+  batch_size: 32
+  lr: 2.0e-7
   weight_decay: 1.0e-5
   loss_kwargs:
-    type: "geco" # "elbo"
-    top_k_percentage: 0.14 # 0.273 # 1 - cohen's kappa
+    type: "elbo"
+    top_k_percentage: 0.273 # 1 - cohen's kappa = 0.273
     deterministic_top_k: False
-    kappa: 0.10
-    decay: 0.99
+    kappa: 0.60
+    kappa_grade: -0.5
     rate: 1.0e-2
-    beta: 1 # 10
+    alpha: 500 # classification
+    beta: 1 # kl
 
 test:
   mc_n: 128

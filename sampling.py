@@ -13,11 +13,11 @@ import imageio
 if __name__ == "__main__":
     # arguments
     parser = ArgumentParser()
-    parser.add_argument("--img-path", type=str, default="data/train/images/Atopy_Segment_Test/Grade2/7205.jpg")
-    parser.add_argument("--sample-n", type=int, default=16)
+    parser.add_argument("--img-path", type=str, default="data/train/images/Atopy_Segment_Extra/Grade2/9115.jpg")
+    parser.add_argument("--sample-n", type=int, default=64)
     parser.add_argument("--cfg", type=str, default="config.yaml")
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--weight", type=str, default="weights/multi/version_3/checkpoints/epoch=149-step=7200.ckpt")
+    parser.add_argument("--weight", type=str, default="lightning_logs/version_13/checkpoints/epoch=485-step=11664.ckpt")
 
     args = parser.parse_args()
     cfg = load_config(args.cfg)
@@ -26,6 +26,7 @@ if __name__ == "__main__":
 
     # model
     model = HierarchicalProbUNet(
+        latent_dims=cfg.model.latent_dims,
         in_channels=cfg.model.in_channels,
         num_classes=cfg.model.num_classes,
         loss_kwargs=dict(cfg.train.loss_kwargs),
@@ -43,19 +44,17 @@ if __name__ == "__main__":
     img = img.expand(args.sample_n, -1, -1, -1).to(args.device)
 
     # Designate latent variables
-    z_q = torch.linspace(0, 3, args.sample_n).reshape(1, -1, 1, 1, 1).to(args.device)  # None
-    mean = True  # None
-    # z_q = None
-    # mean = None # False
+    # z_q = torch.linspace(0, 3, args.sample_n).reshape(1, -1, 1, 1, 1).to(args.device)  # None
+    # mean = True  # None
+    z_q = None
+    mean = [False, False, False, False]
 
     # Sampling
     preds, grades = lit_model.model.sample(img, 1, z_q=z_q, mean=mean)
 
     # Postprocessing
-    mean = torch.zeros_like(preds)
-    mean[preds >= 0.5] = 1.0
-    mean = mean.cpu().numpy()
-    grades = grades.reshape(-1).cpu().numpy()
+    mean = preds.cpu().detach().numpy().astype(np.float32)
+    grades = grades.reshape((-1, 4)).detach().cpu().numpy()
 
     # Make GIF
     images = []
@@ -65,8 +64,38 @@ if __name__ == "__main__":
 
         cv2.putText(
             result,
-            f"Predicted grade : {grades[j]:.2f}",
+            f"Erythema : {grades[j, 0]:.2f}",
             (270, 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            result,
+            f"Papulation : {grades[j, 1]:.2f}",
+            (270, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            result,
+            f"Excoriation : {grades[j, 2]:.2f}",
+            (270, 75),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            result,
+            f"Lichenification : {grades[j, 3]:.2f}",
+            (270, 100),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
             (0, 0, 255),
