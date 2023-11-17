@@ -1,0 +1,3 @@
+[submodule "SemanticSegmentation"]
+	path = SemanticSegmentation
+	url = https://github.com/WillBrennan/SemanticSegmentation.git
