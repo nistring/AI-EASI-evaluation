@@ -57,8 +57,8 @@ class _HierarchicalCore(nn.Module):
         channels = self._channels_per_block[-1]
         for level in range(self.num_latent_levels):
             latent_dim = self._latent_dims[level]
-            self.in_channels = 3 * latent_dim + self._channels_per_block[-2 - level]
-            decoder.append(nn.Conv2d(channels, 2 * latent_dim, kernel_size=(1, 1), padding=0))
+            self.in_channels = (2 if level == 0 else 3) * latent_dim + self._channels_per_block[-2 - level]
+            decoder.append(nn.Conv2d(channels, (1 if level == 0 else 2) * latent_dim, kernel_size=(1, 1), padding=0))
 
             decoder.append(Resize_up())
             for _ in range(self._blocks_per_level):
@@ -104,26 +104,30 @@ class _HierarchicalCore(nn.Module):
         for decoder in self.decoder:
             if type(decoder) == nn.Conv2d:
                 decoder_features = decoder(decoder_features)
+                
+                if i == 0: # grade
+                    z = decoder_features
+                else:
+                    mu = decoder_features[:, :self._latent_dims[i]]
 
-                mu = decoder_features[::, : self._latent_dims[i]]
+                    log_sigma = F.softplus(decoder_features[:, self._latent_dims[i]:])
 
-                log_sigma = F.softplus(decoder_features[::, self._latent_dims[i] :])
+                    norm = Normal(loc=mu, scale=log_sigma)
+                    dist = Independent(norm, 1)
+                    distributions.append(dist)
 
-                norm = Normal(loc=mu, scale=log_sigma)
-                dist = Independent(norm, 1)
-                distributions.append(dist)
+                    z = dist.sample()
 
-                z = dist.sample()
-
-                if mean[i]:
-                    z = dist.mean
+                    if mean[i]:
+                        z = dist.mean
 
                 if z_q is not None:
                     if i < len(z_q):
                         z = z_q[i]
 
-                used_latents.append(z)
                 decoder_output_lo = torch.concat([z, decoder_features], dim=1)
+                    
+                used_latents.append(z)
                 i += 1
             elif type(decoder) == Resize_up:
                 decoder_output_hi = decoder(decoder_output_lo)
@@ -215,6 +219,7 @@ class HierarchicalProbUNet(nn.Module):
         convs_per_block=3,
         blocks_per_level=3,
         loss_kwargs=None,
+        num_grades=(4,4), # (character, severity scores)
     ):
         super(HierarchicalProbUNet, self).__init__()
 
@@ -282,6 +287,8 @@ class HierarchicalProbUNet(nn.Module):
             self._lagmul_grade.register_hook(lambda grad: -grad * self._loss_kwargs["rate"])
             self.softplus = nn.Softplus()
 
+        self.cutpoints = nn.Parameter((torch.arange(num_grades[1])).expand(num_grades) - num_grades[1]/2)
+
     def forward(self, seg, img, grade):
         self._q_sample = self.posterior(torch.concat([seg, img], dim=1))
         self._p_sample_z_q = self.prior(img, z_q=self._q_sample["used_latents"])
@@ -293,7 +300,7 @@ class HierarchicalProbUNet(nn.Module):
         decoder_features = prior_out["decoder_features"]
         # preds = torch.argmax(self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features), dim=1)
         preds = F.softmax(self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features), dim=1)[:, 1]
-        grades = prior_out["used_latents"][0]
+        grades = self.log_cumulative(prior_out["used_latents"][0]).argmax(-1)
 
         for i in range(mc_n - 1):
             prior_out = self.prior(encoder_features, mean, z_q, skip_encoder=True)
@@ -301,7 +308,7 @@ class HierarchicalProbUNet(nn.Module):
             preds = torch.cat(
                 (preds, torch.argmax(self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features), dim=1)), dim=0
             )
-            grades = torch.cat((grades, prior_out["used_latents"][0]))
+            grades = torch.cat((grades, self.log_cumulative(prior_out["used_latents"][0]).argmax(-1)))
 
         return preds, grades
 
@@ -316,20 +323,50 @@ class HierarchicalProbUNet(nn.Module):
         reconstruction = self.reconstruct(seg, img, grade, mean=False)
         return geco_utils.ce_loss(reconstruction, seg, mask, top_k_percentage, deterministic)
 
-    def cls_loss(self, grade):
-        p_dist = self._p_sample_z_q["distributions"][0]
-        mean = p_dist.mean.reshape(grade.shape)
-        var = p_dist.variance.reshape(grade.shape)
-        loss = (grade - mean) ** 2 / var + torch.log(var)
-        loss = {"mean": loss.mean(), "sum": loss.sum(-1).mean()}
+    def log_cumulative(self, logits):
+        """Convert logits to probability
+        https://github.com/EthanRosenthal/spacecutter/blob/master/spacecutter/models.py
+
+        Args:
+            logits (_type_): _description_
+
+        Returns:
+            _type_: _description_
+        """
+        # logits : (B x C x 1 x 1)
+        # cutpoints : (C x num_cuts)
+        sigmoids = torch.sigmoid(self.cutpoints - logits.squeeze(-1))
+        # sigmoids : (B x C x num_cuts)
+        link_mat = torch.cat((
+                sigmoids[..., [0]],
+                sigmoids[..., 1:] - sigmoids[..., :-1],
+                1 - sigmoids[..., [-1]]
+            ),
+            dim=-1
+        )
+        return link_mat
+
+    def cls_loss(self, y_true):
+        
+        q_grade = self._q_sample["used_latents"][0]
+        p_grade = self._p_sample_z_q["used_latents"][0]
+        loss = dict(mean=0., sum=0.)
+        for grade in (q_grade, p_grade):
+            # y_true : (B x C)
+            # y_pred : (B x C x num_cuts)
+            y_pred = self.log_cumulative(grade)
+            eps = 1e-15
+            likelihoods = torch.clamp(torch.gather(y_pred, 2, y_true.unsqueeze(-1)), eps, 1 - eps)
+            neg_log_likelihood = -torch.log(likelihoods)
+            # neg_log_likelihood : (B x C x 1)
+            loss["mean"] += neg_log_likelihood.mean()
+            loss["sum"] += neg_log_likelihood.sum((1,2)).mean()
+
         return loss
 
     def kl_divergence(self, seg, img):
-        posterior_out = self._q_sample
-        prior_out = self._p_sample_z_q
-
-        q_dists = posterior_out["distributions"]
-        p_dists = prior_out["distributions"]
+        q_dists = self._q_sample["distributions"]
+        p_dists = self._p_sample_z_q["distributions"]
 
         kl_dict = {}
         for level, (q, p) in enumerate(zip(q_dists, p_dists)):

@@ -69,7 +69,7 @@ class LitModel(pl.LightningModule):
         self.cfg.exp_date = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.cfg.train.lr, weight_decay=self.cfg.train.weight_decay, betas=(0.99, 0.9999))
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.cfg.train.lr, weight_decay=self.cfg.train.weight_decay)
         return [optimizer]
 
     def on_train_start(self):
@@ -262,7 +262,7 @@ if __name__ == "__main__":
     # train
     if args.phase == "train":
         litmodel = LitModel(model, cfg=cfg)
-        checkpoint_callback = ModelCheckpoint(monitor="val_kl_sum")
+        checkpoint_callback = ModelCheckpoint(monitor="val_loss")
         trainer = pl.Trainer(
             max_epochs=cfg.train.max_epochs,
             devices=args.devices,

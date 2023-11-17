@@ -17,7 +17,7 @@ if __name__ == "__main__":
     parser.add_argument("--sample-n", type=int, default=64)
     parser.add_argument("--cfg", type=str, default="config.yaml")
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--weight", type=str, default="lightning_logs/version_13/checkpoints/epoch=485-step=11664.ckpt")
+    parser.add_argument("--weight", type=str, default="lightning_logs/version_1/checkpoints/epoch=1440-step=103752.ckpt")
 
     args = parser.parse_args()
     cfg = load_config(args.cfg)

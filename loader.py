@@ -101,7 +101,7 @@ class AtopyDataset(Dataset):
         transformed = self.transforms(image=img, masks=masks)
         masks = np.stack(transformed["masks"], axis=0)
         masks = np.stack([1 - masks, masks], axis=1)  # background / target
-        grade = self.grades.loc[int(os.path.basename(self.imgs[idx]).split('.')[0])].to_numpy().astype(np.float32)
+        grade = self.grades.loc[int(os.path.basename(self.imgs[idx]).split('.')[0])].to_numpy().astype(np.int64)
 
         return masks, transformed["image"], grade, img
 
