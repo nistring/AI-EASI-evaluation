@@ -17,7 +17,7 @@ if __name__ == "__main__":
     parser.add_argument("--sample-n", type=int, default=64)
     parser.add_argument("--cfg", type=str, default="config.yaml")
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--weight", type=str, default="lightning_logs/version_1/checkpoints/epoch=1440-step=103752.ckpt")
+    parser.add_argument("--weight", type=str, default="lightning_logs/version_5/checkpoints/epoch=99-step=35400.ckpt")
 
     args = parser.parse_args()
     cfg = load_config(args.cfg)
@@ -30,6 +30,8 @@ if __name__ == "__main__":
         in_channels=cfg.model.in_channels,
         num_classes=cfg.model.num_classes,
         loss_kwargs=dict(cfg.train.loss_kwargs),
+        num_grades=cfg.model.num_grades,
+        num_cuts=cfg.model.num_cuts
     )
 
     # Load model
@@ -64,7 +66,7 @@ if __name__ == "__main__":
 
         cv2.putText(
             result,
-            f"Erythema : {grades[j, 0]:.2f}",
+            f"Erythema : {grades[j, 0]}",
             (270, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -74,7 +76,7 @@ if __name__ == "__main__":
         )
         cv2.putText(
             result,
-            f"Papulation : {grades[j, 1]:.2f}",
+            f"Papulation : {grades[j, 1]}",
             (270, 50),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -84,7 +86,7 @@ if __name__ == "__main__":
         )
         cv2.putText(
             result,
-            f"Excoriation : {grades[j, 2]:.2f}",
+            f"Excoriation : {grades[j, 2]}",
             (270, 75),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -94,7 +96,7 @@ if __name__ == "__main__":
         )
         cv2.putText(
             result,
-            f"Lichenification : {grades[j, 3]:.2f}",
+            f"Lichenification : {grades[j, 3]}",
             (270, 100),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,

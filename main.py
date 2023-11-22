@@ -69,14 +69,17 @@ class LitModel(pl.LightningModule):
         self.cfg.exp_date = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.cfg.train.lr, weight_decay=self.cfg.train.weight_decay)
-        return [optimizer]
+        optimizer = torch.optim.SGD(self.parameters(), lr=self.cfg.train.lr, weight_decay=self.cfg.train.weight_decay)
+        scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=self.cfg.train.max_epochs)
+        return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
     def on_train_start(self):
         self.logger.log_hyperparams(dict(self.cfg.train))
 
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
+        sch = self.lr_schedulers()
+
         seg, img, grade, _ = batch
         for i in range(seg.shape[1]):
             loss_dict = self.model.sum_loss(seg[:, i], img, grade)
@@ -88,6 +91,8 @@ class LitModel(pl.LightningModule):
             opt.step()
 
             self.log_dict({"train_" + k: v for k, v in summaries.items()}, sync_dist=True)
+
+        sch.step()
 
     def validation_step(self, batch, batch_idx):
         seg, img, grade, _ = batch
@@ -257,6 +262,8 @@ if __name__ == "__main__":
         in_channels=cfg.model.in_channels,
         num_classes=cfg.model.num_classes,
         loss_kwargs=dict(cfg.train.loss_kwargs),
+        num_grades=cfg.model.num_grades,
+        num_cuts=cfg.model.num_cuts
     )
 
     # train

@@ -1,10 +1,10 @@
 num_workers: 16
 
 train:
-  max_epochs: 2000
+  max_epochs: 100
   batch_size: 32
   lr: 1.0e-6
-  weight_decay: 0
+  weight_decay: 1.0e-5
   loss_kwargs:
     type: "elbo"
     top_k_percentage: null # 1 - cohen's kappa = 0.273
@@ -12,8 +12,8 @@ train:
     kappa: 0.60
     kappa_grade: -0.5
     rate: 1.0e-2
-    alpha: 1000 # classification
-    beta: 0.01 # kl
+    alpha: 100 # classification
+    beta: 10 # kl
 
 test:
   mc_n: 128
@@ -24,7 +24,8 @@ predict:
   th: 1.0
 
 model:
-  latent_dims: [4,1,1,1]
+  latent_dims: [1,1,1,1]
   in_channels: 3
   num_classes: 2
-  num_grades: [4,4]
+  num_grades: 6
+  num_cuts: 3

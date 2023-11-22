@@ -12,6 +12,7 @@ import functools
 from patchify import patchify
 from sklearn.metrics import cohen_kappa_score
 import pandas as pd
+import pickle
 
 image_size = 256
 
@@ -79,21 +80,25 @@ class CustomDataset(Dataset):
 
 
 class AtopyDataset(Dataset):
-    def __init__(self, imgs, masks, classes, transforms):
+    def __init__(self, imgs, masks, transforms):
         self.transforms = transforms
         self.imgs = imgs
         self.masks = masks
-        self.grades = pd.read_pickle("data/train/classes/Mean_class.pkl")
-        self.classes = classes
+
+        with open("data/train/classes/meta_result.pkl", "rb") as f:
+            data = pickle.load(f)
+            index = list(data["index"])
+        self.anno = data["annotations"][[index.index(int(os.path.basename(x).split('.')[0])) for x in self.imgs]]
         self.labellers = os.listdir("data/train/labels")
 
     def __getitem__(self, idx):
-        img = cv2.imread(self.imgs[idx])
+        img_idx = idx % len(self.imgs)
+        img = cv2.imread(self.imgs[img_idx])
         img = cv2.resize(img, (512, 512))
 
         masks = []
         for labeller in self.labellers:
-            mask = cv2.imread(os.path.join("data/train/labels", labeller, self.masks[idx]), 0)
+            mask = cv2.imread(os.path.join("data/train/labels", labeller, self.masks[img_idx]), 0)
             mask = cv2.resize(mask, (512, 512))
             mask[mask != 0] = 1
             masks.append(mask)
@@ -101,7 +106,8 @@ class AtopyDataset(Dataset):
         transformed = self.transforms(image=img, masks=masks)
         masks = np.stack(transformed["masks"], axis=0)
         masks = np.stack([1 - masks, masks], axis=1)  # background / target
-        grade = self.grades.loc[int(os.path.basename(self.imgs[idx]).split('.')[0])].to_numpy().astype(np.int64)
+
+        grade = self.anno[img_idx].astype(np.int64)
 
         return masks, transformed["image"], grade, img
 
@@ -114,7 +120,6 @@ def get_file_list(phase):
 
     imgs = []
     masks = []
-    classes = []
     for g, grade in enumerate(["Grade0", "Grade1", "Grade2", "Grade3"]):
         intersection = []
         for labeller in labellers:
@@ -124,25 +129,24 @@ def get_file_list(phase):
 
         imgs.extend(list(map(lambda x: os.path.join("data/train/images", phase, grade, x + ".jpg"), intersection)))
         masks.extend(list(map(lambda x: os.path.join(phase, grade, x + ".png"), intersection)))
-        classes.extend([int(grade[-1])] * len(intersection))
         print(phase, grade, len(intersection))
 
-    return len(imgs), np.array(imgs), np.array(masks), np.array(classes)
+    return len(imgs), np.array(imgs), np.array(masks)
 
 
 def get_dataset(phase, split_ratio=0.2):
 
-    total_num_samples, imgs, masks, classes = get_file_list(phase)
+    total_num_samples, imgs, masks = get_file_list(phase)
 
     if phase == "Atopy_Segment_Train":
         val_idx = random.sample(range(total_num_samples), int(total_num_samples * split_ratio))
         train_idx = [x for x in range(total_num_samples) if x not in val_idx]
 
-        return AtopyDataset(imgs[train_idx], masks[train_idx], classes[train_idx], train_transforms), AtopyDataset(
-            imgs[val_idx], masks[val_idx], classes[val_idx], test_transforms
+        return AtopyDataset(imgs[train_idx], masks[train_idx], train_transforms), AtopyDataset(
+            imgs[val_idx], masks[val_idx], test_transforms
         )
     else:
-        return AtopyDataset(imgs, masks, classes, test_transforms)
+        return AtopyDataset(imgs, masks, test_transforms)
 
 
 if __name__ == "__main__":
@@ -150,8 +154,8 @@ if __name__ == "__main__":
     #     get_file_list(phase)
 
     cols = 10
-    total_num_samples, imgs, masks, classes = get_file_list("Atopy_Segment_Train")
-    dataset = AtopyDataset(imgs, masks, classes, train_transforms)
+    total_num_samples, imgs, masks = get_file_list("Atopy_Segment_Train")
+    dataset = AtopyDataset(imgs, masks, train_transforms)
     train_aug = A.Compose([t for t in train_transforms if not isinstance(t, (A.Normalize, ToTensorV2))])
     test_aug = A.Compose([t for t in test_transforms if not isinstance(t, (A.Normalize, ToTensorV2))])
 
@@ -204,10 +208,10 @@ if __name__ == "__main__":
     """
     Adopted from https://kozodoi.me/blog/20210308/compute-image-stats
     """
-    total_num_samples, imgs, masks, classes = get_file_list("Atopy_Segment_Train")
+    total_num_samples, imgs, masks = get_file_list("Atopy_Segment_Train")
     ####### COMPUTE MEAN / STD
     test_transforms = A.Compose([A.Resize(image_size, image_size), A.Normalize(mean=0, std=1), ToTensorV2()])
-    dataset = AtopyDataset(imgs, masks, classes, test_transforms)
+    dataset = AtopyDataset(imgs, masks, test_transforms)
     image_loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=16, pin_memory=True)
     # placeholders
     psum = torch.tensor([0.0, 0.0, 0.0])
