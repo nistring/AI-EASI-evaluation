@@ -1,1 +1,1 @@
-python main.py --phase test --checkpoint weights/multi/cls/checkpoints/epoch=929-step=44640.ckpt --devices 0
+python main.py --phase test --checkpoint lightning_logs/version_2/checkpoints/epoch=99-step=2400.ckpt --devices 1

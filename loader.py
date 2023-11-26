@@ -46,32 +46,39 @@ test_transforms = A.Compose(
 
 
 class CustomDataset(Dataset):
-    def __init__(self, root: str):
+    def __init__(self, root: str, step: int):
         self.root = root
         self.imgs = sorted(os.listdir(root))
-        self.patch_size = 578 * 2
+        self.patch_size = 578
+        assert step >= 256 / 2
+        self.step = step
 
     def __getitem__(self, idx):
         file_name = self.imgs[idx]
         ori_img = cv2.imread(os.path.join(self.root, file_name))
-        re_h = int(ori_img.shape[0] // (self.patch_size / 2) * 128)
-        re_w = int(ori_img.shape[1] // (self.patch_size / 2) * 128)
-        ori_img = cv2.resize(ori_img, (re_w, re_h))
+        ori_img = cv2.resize(int(ori_img.shape[1] / self.patch_size * 256), (re_w, int(ori_img.shape[0] / self.patch_size * 256)))
+        ori_img = np.pad(
+            ori_img,
+            (
+                (256 - self.step, ori_img.shape[0] // self.step * self.step - ori_img.shape[0] + 256),
+                (256 - self.step, ori_img.shape[1] // self.step * self.step - ori_img.shape[1] + 256),
+            ),
+        )
 
-        mask = (ori_img[:, :, 0] >= 250) & (ori_img[:, :, 1] >= 250) & (ori_img[:, :, 2] >= 250)
+        mask = ori_img.sum(2) == 0
         mask = np.stack((mask, mask, mask), axis=-1)
         ori_img[mask] = 0
 
         transforms = A.Compose([A.Normalize(mean=(0.4379, 0.5198, 0.6954), std=(0.1190, 0.1178, 0.1243))])
         img = transforms(image=ori_img)["image"]
 
-        patches = patchify(np.transpose(img, (2, 0, 1)), (3, 256, 256), step=128)
-
+        patches = patchify(np.transpose(img, (2, 0, 1)), (3, 256, 256), step=self.step)
+        
         sample = {
-            "patches": patches,
+            "patches": patches[0],
             "ori_img": ori_img,
             "file_name": file_name.split(".")[0] + ".png",
-            "mask": mask
+            "mask": mask,
         }
         return sample
 
@@ -88,26 +95,26 @@ class AtopyDataset(Dataset):
         with open("data/train/classes/meta_result.pkl", "rb") as f:
             data = pickle.load(f)
             index = list(data["index"])
-        self.anno = data["annotations"][[index.index(int(os.path.basename(x).split('.')[0])) for x in self.imgs]]
+        self.anno = data["annotations"][[index.index(int(os.path.basename(x).split(".")[0])) for x in self.imgs]]
         self.labellers = os.listdir("data/train/labels")
 
     def __getitem__(self, idx):
-        img_idx = idx % len(self.imgs)
-        img = cv2.imread(self.imgs[img_idx])
+        img = cv2.imread(self.imgs[idx])
         img = cv2.resize(img, (512, 512))
 
         masks = []
         for labeller in self.labellers:
-            mask = cv2.imread(os.path.join("data/train/labels", labeller, self.masks[img_idx]), 0)
+            mask = cv2.imread(os.path.join("data/train/labels", labeller, self.masks[idx]), 0)
             mask = cv2.resize(mask, (512, 512))
             mask[mask != 0] = 1
             masks.append(mask)
 
         transformed = self.transforms(image=img, masks=masks)
+        # B x labellers(2) x H x W
         masks = np.stack(transformed["masks"], axis=0)
-        masks = np.stack([1 - masks, masks], axis=1)  # background / target
 
-        grade = self.anno[img_idx].astype(np.int64)
+        # B x C x labellers(5)
+        grade = self.anno[idx, :4].astype(np.int64)
 
         return masks, transformed["image"], grade, img
 
@@ -134,7 +141,7 @@ def get_file_list(phase):
     return len(imgs), np.array(imgs), np.array(masks)
 
 
-def get_dataset(phase, split_ratio=0.2):
+def get_dataset(phase, split_ratio=0.1):
 
     total_num_samples, imgs, masks = get_file_list(phase)
 
@@ -171,7 +178,7 @@ if __name__ == "__main__":
 
     fig, ax = plt.subplots(nrows=1, ncols=cols, figsize=(64, 16))
     for i in range(cols):
-        idx = random.randint(0, len(dataset)-1)
+        idx = random.randint(0, len(dataset) - 1)
 
         img = cv2.imread(dataset.imgs[idx])
         img = cv2.resize(img, (512, 512))
@@ -216,7 +223,7 @@ if __name__ == "__main__":
     # placeholders
     psum = torch.tensor([0.0, 0.0, 0.0])
     psum_sq = torch.tensor([0.0, 0.0, 0.0])
-    cohens_k = .0
+    cohens_k = 0.0
 
     # loop through images
     for mask, inputs, grade, img in tqdm(image_loader):

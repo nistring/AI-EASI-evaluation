@@ -32,3 +32,8 @@ Make a report on test dataset.
 Generate predicted skin lesion segmentation.
 
 `bash scripts/predict.sh`
+
+### To do
+Mixed precision
+Pruning
+Tensorrt

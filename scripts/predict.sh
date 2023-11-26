@@ -1,1 +1,1 @@
-python main.py --phase predict --checkpoint weights/multi/cls/checkpoints/epoch=929-step=44640.ckpt --devices 2
+python main.py --phase predict --checkpoint lightning_logs/version_2/checkpoints/epoch=99-step=2400.ckpt --devices 2

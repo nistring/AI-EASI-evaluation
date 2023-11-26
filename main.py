@@ -5,27 +5,23 @@ import torch.nn.functional as F
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import (
     EarlyStopping,
-    StochasticWeightAveraging,
     ModelCheckpoint,
 )
-from lightning.pytorch.tuner import Tuner
 
 from argparse import ArgumentParser
 import os
 import cv2
-import math
 import numpy as np
 from sklearn.metrics import cohen_kappa_score
 import pandas as pd
 from copy import deepcopy
 from datetime import datetime
-from tqdm import tqdm
 import shutil
 
 from loader import get_dataset, CustomDataset
 from model.model import HierarchicalProbUNet
 from utils import *
-
+from scheduler import CosineAnnealingWarmUpRestarts
 
 class AtopyDataModule(pl.LightningDataModule):
     def __init__(self, cfg):
@@ -36,7 +32,7 @@ class AtopyDataModule(pl.LightningDataModule):
         self.train, self.val = get_dataset("Atopy_Segment_Train")
         self.test = get_dataset("Atopy_Segment_Test")
         # self.test = get_dataset("Atopy_Segment_Extra")
-        self.predict = CustomDataset("data/predict")
+        self.predict = CustomDataset("data/predict", step=self.cfg.predict.step)
 
     def train_dataloader(self):
         return DataLoader(
@@ -51,7 +47,7 @@ class AtopyDataModule(pl.LightningDataModule):
         return DataLoader(self.val, batch_size=self.cfg.train.batch_size, num_workers=self.cfg.num_workers, pin_memory=True)
 
     def test_dataloader(self):
-        return DataLoader(self.test, batch_size=1, num_workers=self.cfg.num_workers, pin_memory=True)
+        return DataLoader(self.test, batch_size=self.cfg.test.batch_size, num_workers=self.cfg.num_workers, pin_memory=True)
 
     def predict_dataloader(self):
         return DataLoader(self.predict, batch_size=1, num_workers=self.cfg.num_workers, pin_memory=True)
@@ -63,65 +59,60 @@ class LitModel(pl.LightningModule):
         self.model = model
         self.cfg = cfg
         self.mc_n = cfg.test.mc_n
-        self.mc_n -= self.mc_n % cfg.test.batch_size
-        self.automatic_optimization = False
         self.exp_name = exp_name
         self.cfg.exp_date = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
 
     def configure_optimizers(self):
-        optimizer = torch.optim.SGD(self.parameters(), lr=self.cfg.train.lr, weight_decay=self.cfg.train.weight_decay)
-        scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=self.cfg.train.max_epochs)
-        return {"optimizer": optimizer, "lr_scheduler": scheduler}
+        optimizer = torch.optim.Adam(self.parameters(), lr=0, weight_decay=self.cfg.train.weight_decay)
+        scheduler = CosineAnnealingWarmUpRestarts(optimizer, self.cfg.train.T_0, eta_max=self.cfg.train.lr, T_up=self.cfg.train.T_up, gamma=self.cfg.train.gamma)
+        return {"optimizer": optimizer,  "lr_scheduler": scheduler}
 
     def on_train_start(self):
         self.logger.log_hyperparams(dict(self.cfg.train))
 
     def training_step(self, batch, batch_idx):
-        opt = self.optimizers()
-        sch = self.lr_schedulers()
-
         seg, img, grade, _ = batch
-        for i in range(seg.shape[1]):
-            loss_dict = self.model.sum_loss(seg[:, i], img, grade)
-            loss = loss_dict["supervised_loss"]
-            summaries = loss_dict["summaries"]
 
-            opt.zero_grad()
-            self.manual_backward(loss)
-            opt.step()
-
-            self.log_dict({"train_" + k: v for k, v in summaries.items()}, sync_dist=True)
-
-        sch.step()
+        mask = seg[:, [np.random.randint(seg.shape[1])]]
+        loss_dict = self.model.sum_loss(
+            torch.einsum("BLHW,BC->BCHW", mask, grade[..., np.random.randint(grade.shape[-1])]), img, lesion_area=mask
+        )
+        loss = loss_dict["supervised_loss"]
+        summaries = loss_dict["summaries"]
+        self.log_dict({"train_" + k: v for k, v in summaries.items()}, sync_dist=True)
+        return loss
 
     def validation_step(self, batch, batch_idx):
         seg, img, grade, _ = batch
         for i in range(seg.shape[1]):
-            loss_dict = self.model.sum_loss(seg[:, i], img, grade)
-            loss = loss_dict["supervised_loss"]
-            summaries = loss_dict["summaries"]
+            for j in range(grade.shape[-1]):
+                loss_dict = self.model.sum_loss(torch.einsum("BLHW,BC->BCHW", seg[:, [i]], grade[..., j]), img, lesion_area=seg[:, [i]])
+                loss = loss_dict["supervised_loss"]
+                summaries = loss_dict["summaries"]
 
-            self.log_dict({"val_" + k: v for k, v in summaries.items()}, sync_dist=True)
+                self.log_dict({"val_" + k: v for k, v in summaries.items()}, sync_dist=True)
 
     def test_or_predict(self, img):
-        b, c, h, w = img.shape
-        img = img.expand(self.cfg.test.batch_size, c, h, w)
 
-        preds, grades = self.model.sample(img, self.mc_n // self.cfg.test.batch_size)
+        preds, grades = self.model.sample(img, self.mc_n)
+        # preds: (B x N x H x W)
+        # grades: (B x C x num_cuts+1)
+        weight = torch.Tensor([0.0, 0.1, 0.2, 0.3]).to(grades.device)
+        mean_grade = (grades[:, :4] * weight / weight.sum()).sum((1, 2), keepdims=True)
 
         mean = torch.zeros_like(preds)
         mean[preds >= 0.5] = 1.0
 
-        weighted_mean = (mean * grades).mean(0)
-        std = mean.std(0)
-        mean = mean.mean(0)
+        weighted_mean = mean.mean(1) * mean_grade
+        std = mean.std(1)
+        mean = mean.mean(1)
 
-        entropy = preds.mean(0)
+        entropy = preds.mean(1)
         entropy = -(entropy * torch.log(entropy) + (1 - entropy) * torch.log(1 - entropy))
 
-        mutual_information = entropy + (preds * torch.log(preds) + (1 - preds) * torch.log(1 - preds)).mean(0)
+        mutual_information = entropy + (preds * torch.log(preds) + (1 - preds) * torch.log(1 - preds)).mean(1)
 
-        return mean, weighted_mean, std, entropy, mutual_information, grades.reshape(-1)
+        return mean, weighted_mean, std, entropy, mutual_information, grades
 
     def on_test_start(self):
         self.logger.log_hyperparams(dict(self.cfg.test))
@@ -149,7 +140,7 @@ class LitModel(pl.LightningModule):
         cohens_k = cohen_kappa_score(seg[0], seg[1])
 
         # Sampling
-        mean, weighted_mean, std, entropy, mi, grade = self.test_or_predict(img)
+        mean, weighted_mean, std, entropy, mi, grades = self.test_or_predict(img)
 
         self.img.append(ori_img.cpu().numpy())
         self.gt.append(gt)
@@ -180,6 +171,11 @@ class LitModel(pl.LightningModule):
 
     def on_predict_start(self):
         self.logger.log_hyperparams(dict(self.cfg.predict))
+        self.step = self.cfg.predict.step
+        window = np.ones(256)
+        window[: 256 - self.step] = np.arange(256 - self.step) / self.step
+        window = np.tile(window[:, np.newaxis], (1, 256))
+        self.window = window * np.rot90(window) * np.rot90(window, 2) * np.rot90(window, 3)
 
     def predict_step(self, batch, batch_idx):
         patches = batch["patches"][0]
@@ -187,33 +183,32 @@ class LitModel(pl.LightningModule):
         file_name = batch["file_name"][0]
         mask = batch["mask"][0, :, :, 0].bool().cpu().numpy()
 
-        pred = np.zeros(((patches.shape[1] + 1) * 128, (patches.shape[2] + 1) * 128))
+        nx = patches.shape[1]
+        patches = patches.reshape(-1, patches.shape[2], patches.shape[3], patches.shape[4])
+        bs = self.cfg.test.batch_size
+        valid = []
+        for i in range(patches.shape[0]):
+            if not torch.all(patches[i] == 0):
+                valid.append(i)
+
+        pred = np.zeros((patches.shape[1] * self.step + 256, patches.shape[2] * self.step + 256))
         weighted_pred = np.zeros_like(pred)
         uncertainty = np.zeros_like(pred)
 
-        with tqdm(total=patches.shape[1] * patches.shape[2]) as pbar:
-            for i in range(patches.shape[1]):
-                for j in range(patches.shape[2]):
-                    patch = patches[:, i, j]
-                    if not torch.all(patch == 0):
-                        mean, weighted_mean, std, entropy, mi, grade = self.test_or_predict(patch)
-                        pred[i * 128 : i * 128 + 256, j * 128 : j * 128 + 256] += mean.cpu().numpy()
-                        weighted_pred[i * 128 : i * 128 + 256, j * 128 : j * 128 + 256] += weighted_mean.cpu().numpy()
-                        if self.cfg.predict.metric == "entropy":
-                            u = entropy
-                        elif self.cfg.predict.metric == "mi":
-                            u = mi
-                        else:
-                            u = std
-                        uncertainty[i * 128 : i * 128 + 256, j * 128 : j * 128 + 256] += u.cpu().numpy()
-                    pbar.update(1)
-
-        pred[128:-128] /= 2
-        pred[:, 128:-128] /= 2
-        weighted_pred[128:-128] /= 2
-        weighted_pred[:, 128:-128] /= 2
-        uncertainty[128:-128] /= 2
-        uncertainty[:, 128:-128] /= 2
+        for i in range(len(valid) // bs + 1):
+            mean, weighted_mean, std, entropy, mi, grades = self.test_or_predict(patches[valid[i * bs : min((i + 1) * bs, len(valid))]])
+            for j in range(bs):
+                y = valid[i * bs + j] // nx
+                x = valid[i * bs + j] % nx
+                pred[y : y + 256, x : x + 256] += mean[j].cpu().numpy() * self.window
+                weighted_pred[y : y + 256, x : x + 256] += weighted_mean[j].cpu().numpy() * self.window
+                if self.cfg.predict.metric == "entropy":
+                    u = entropy
+                elif self.cfg.predict.metric == "mi":
+                    u = mi
+                else:
+                    u = std
+                uncertainty[y : y + 256, x : x + 256] += u[j].cpu().numpy() * self.window
 
         # Size
         height, width = img.shape[:2]
@@ -251,8 +246,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     cfg = load_config(args.cfg)
 
-    assert cfg.test.mc_n >= cfg.test.batch_size, print("Number of MC trials must be greater than batch size!")
-
     # dataset
     atopy = AtopyDataModule(cfg)
 
@@ -262,8 +255,7 @@ if __name__ == "__main__":
         in_channels=cfg.model.in_channels,
         num_classes=cfg.model.num_classes,
         loss_kwargs=dict(cfg.train.loss_kwargs),
-        num_grades=cfg.model.num_grades,
-        num_cuts=cfg.model.num_cuts
+        num_cuts=cfg.model.num_cuts,
     )
 
     # train
@@ -277,6 +269,7 @@ if __name__ == "__main__":
             strategy="ddp_find_unused_parameters_true",
             callbacks=[checkpoint_callback],
             log_every_n_steps=10,
+            profiler="advanced"
         )
         if args.checkpoint:
             trainer.fit(litmodel, datamodule=atopy, ckpt_path=args.checkpoint)

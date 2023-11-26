@@ -9,15 +9,20 @@ import random
 from loader import test_transforms
 from sklearn.metrics import cohen_kappa_score
 import imageio
+from tqdm import tqdm
+import torch
+
+
 
 if __name__ == "__main__":
     # arguments
     parser = ArgumentParser()
-    parser.add_argument("--img-path", type=str, default="data/train/images/Atopy_Segment_Extra/Grade2/9115.jpg")
-    parser.add_argument("--sample-n", type=int, default=64)
+    # parser.add_argument("--img-path", type=str, default="data/train/images/Atopy_Segment_Extra/Grade2/9115.jpg")
+    parser.add_argument("--img-path", type=str, default="data/train/images/Atopy_Segment_Extra/Grade1/9753.jpg")
+    parser.add_argument("--sample-n", type=int, default=100)
     parser.add_argument("--cfg", type=str, default="config.yaml")
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--weight", type=str, default="lightning_logs/version_5/checkpoints/epoch=99-step=35400.ckpt")
+    parser.add_argument("--weight", type=str, default="lightning_logs/version_2/checkpoints/epoch=281-step=3948.ckpt")
 
     args = parser.parse_args()
     cfg = load_config(args.cfg)
@@ -30,8 +35,7 @@ if __name__ == "__main__":
         in_channels=cfg.model.in_channels,
         num_classes=cfg.model.num_classes,
         loss_kwargs=dict(cfg.train.loss_kwargs),
-        num_grades=cfg.model.num_grades,
-        num_cuts=cfg.model.num_cuts
+        num_cuts=cfg.model.num_cuts,
     )
 
     # Load model
@@ -52,59 +56,67 @@ if __name__ == "__main__":
     mean = [False, False, False, False]
 
     # Sampling
-    preds, grades = lit_model.model.sample(img, 1, z_q=z_q, mean=mean)
+    # logits : B(N) x H x W x C+1
+    logits = lit_model.model.sample(img, 1, z_q=z_q, mean=mean)[0]
+    mask = torch.sigmoid(logits[...,[0]])
+    logits = logits[...,1:]
 
-    # Postprocessing
-    mean = preds.cpu().detach().numpy().astype(np.float32)
-    grades = grades.reshape((-1, 4)).detach().cpu().numpy()
-
-    # Make GIF
     images = []
-    img = cv2.resize(ori_img, (256, 256))
-    for j in range(mean.shape[0]):
-        result = np.concatenate((img, (cv2.cvtColor(mean[j], cv2.COLOR_GRAY2RGB) * 255).astype(np.uint8)), axis=1)
+    for th in tqdm(np.arange(0.9, 0.0, -0.1)):
+        for bias in np.arange(-1., 1.1, 0.1):
+            # Postprocessing
+            img = cv2.resize(ori_img, (256, 256))
+            # preds: B(N) x H x W x C
+            preds = (
+                lit_model.model.log_cumulative(logits.reshape(-1, logits.shape[-1]) + bias).argmax(-1).reshape(logits.shape)[:, :, :, :4]
+            ) * (mask >= th)
+            easi = preds.float().mean() * 24
+            preds = heatmap(img, preds)
 
-        cv2.putText(
-            result,
-            f"Erythema : {grades[j, 0]}",
-            (270, 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 0, 255),
-            1,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            result,
-            f"Papulation : {grades[j, 1]}",
-            (270, 50),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 0, 255),
-            1,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            result,
-            f"Excoriation : {grades[j, 2]}",
-            (270, 75),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 0, 255),
-            1,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            result,
-            f"Lichenification : {grades[j, 3]}",
-            (270, 100),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 0, 255),
-            1,
-            cv2.LINE_AA,
-        )
+            result = np.concatenate([img] + [preds[i] for i in range(preds.shape[0])], axis=1)
+            cv2.putText(
+                result,
+                f"Bias: {bias:.1f}",
+                (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 0),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                result,
+                f"Threshold: {th:.1f}",
+                (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 0),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                result,
+                f"EASI: {easi:.2f}",
+                (10, 75),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 0),
+                1,
+                cv2.LINE_AA,
+            )
+            
+            for i, text in enumerate(("Erythema", "Induration", "Excoriation", "Lichenification")):
+                cv2.putText(
+                    result,
+                    text,
+                    (256 * (i+1) + 10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 0, 0),
+                    1,
+                    cv2.LINE_AA,
+                )
 
-        images.append(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+            images.append(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
     
-    imageio.mimsave("samples.gif", images, fps=4)
+    imageio.mimsave("samples.gif", images, fps=15)
