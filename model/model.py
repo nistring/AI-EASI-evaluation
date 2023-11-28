@@ -280,7 +280,9 @@ class HierarchicalProbUNet(nn.Module):
             self.softplus = nn.Softplus()
 
         self._alpha = nn.Parameter(torch.Tensor([self._loss_kwargs["alpha"]]), requires_grad=False)
-        self.cutpoints = nn.Parameter(((torch.arange(1, num_cuts, dtype=torch.float32)).expand((num_classes, num_cuts - 1))) / self._alpha)
+        self.cutpoints = nn.Parameter(
+            ((torch.arange(1, num_cuts, dtype=torch.float32, requires_grad=True)).expand((num_classes, num_cuts - 1))) / self._alpha
+        )
         self._num_classes = num_classes
         self._num_cuts = num_cuts
 
@@ -296,35 +298,14 @@ class HierarchicalProbUNet(nn.Module):
             encoder_features = prior_out["encoder_features"]
             logits = self.f_comb(encoder_features=encoder_features, decoder_features=prior_out["decoder_features"]).unsqueeze(0)
 
-            # preds : (mc_n x B x C x H x W x num_cuts+1)
-            # preds = (
-            #     self.log_cumulative(logits.permute(0, 2, 3, 1).reshape(-1, self._num_classes))
-            #     .reshape((1,) + logits.shape[[0, 2, 3, 1]] + (-1,))
-            #     .permute(0, 1, 4, 2, 3, 5)
-            # )
-            # for i in tqdm(range(mc_n - 1)):
-            #     prior_out = self.prior(encoder_features, mean=mean, z_q=z_q, skip_encoder=True)
-            #     logits = self.f_comb(encoder_features=encoder_features, decoder_features=prior_out["decoder_features"])
-            #     preds = (
-            #         self.log_cumulative(logits.permute(0, 2, 3, 1).reshape(-1, self._num_classes)).argmax(-1).reshape(logits.shape[[0, 2, 3]])
-            #     )
-            #     preds = torch.cat(
-            #         (
-            #             preds,
-            #             self.log_cumulative(logits.permute(0, 2, 3, 1).reshape(-1, self._num_classes))
-            #             .reshape((1,) + logits.shape[[0, 2, 3, 1]] + (-1,))
-            #             .permute(0, 1, 4, 2, 3, 5)
-            #         ),
-            #         dim=0,
-            #     )
             for i in tqdm(range(mc_n - 1)):
                 prior_out = self.prior(encoder_features, mean=mean, z_q=z_q, skip_encoder=True)
                 logits = torch.cat(
                     self.f_comb(encoder_features=encoder_features, decoder_features=prior_out["decoder_features"]).unsqueeze(0), dim=0
                 )
-
             # N x B x H x W x C
-            return logits.permute(0, 1, 3, 4, 2).float()
+            logits = logits.permute(0, 1, 3, 4, 2).float()
+            return torch.sigmoid(logits[...,[0]]), logits[...,1:]
 
     def reconstruct(self, seg, img, mean):
         self.forward(seg, img, mean)
@@ -342,7 +323,9 @@ class HierarchicalProbUNet(nn.Module):
 
         logits = torch.reshape(logits, (-1, self._num_classes + 1))
         y_true = torch.reshape(seg, (-1, self._num_classes))
-        lesion_area = torch.reshape(lesion_area, (-1,)).float()
+        lesion_area = lesion_area.reshape(
+            -1,
+        ).float()
 
         if skin_area is None:
             skin_area = torch.ones(
@@ -351,21 +334,20 @@ class HierarchicalProbUNet(nn.Module):
         else:
             skin_area = torch.reshape(skin_area, (-1,)).float()
 
-        # y_pred(self.log_cumulative(logits)) : (N x C x num_cuts+1)
-        # y_true : (N x C) -> (N x C x 1)
+        # link_mat : N x C x (1, 1, num_cuts - 1)
+        # y_true : N x C
         # nll : (N x C x 1)
 
         batch_size = seg.shape[0]
-        nll = F.nll_loss(
-            torch.log(self.log_cumulative(logits[:, 1:]).reshape(-1, self._num_cuts + 1)),
-            y_true.reshape(
-                -1,
-            ),
-            reduction="none",
-        ).reshape(batch_size, self._num_classes, -1)
+        link_mat_0, link_mat_1, link_mat = self.log_cumulative(logits[:, 1:])
+        y_true = F.one_hot(y_true)
+        nll = -torch.log(link_mat_0 * y_true[:, :, [0]] + link_mat_1 * y_true[:, :, [1]] + (link_mat * y_true[:, :, 2:]).sum(-1, keepdim=True)).reshape(
+            batch_size, -1, self._num_classes
+        )
+
         xe = F.binary_cross_entropy_with_logits(logits[:, 0], lesion_area, reduction="none").reshape(batch_size, -1)
 
-        lesion_area = torch.reshape(lesion_area, shape=(batch_size, 1, -1))
+        lesion_area = torch.reshape(lesion_area, shape=(batch_size, -1, 1))
         skin_area = torch.reshape(skin_area, shape=(batch_size, -1))
 
         return {
@@ -386,13 +368,17 @@ class HierarchicalProbUNet(nn.Module):
         """
         # logits : (N x C)
         # cutpoints : (C x num_cuts)
-        sigmoids = torch.sigmoid(
-            torch.cat((torch.zeros(self._num_classes, 1).float().to(logits.device), self.cutpoints * self._alpha), dim=-1).unsqueeze(0)
-            - logits.unsqueeze(-1)
-        )
-        # sigmoids : (N x C x num_cuts)
-        link_mat = torch.cat((sigmoids[..., [0]], sigmoids[..., 1:] - sigmoids[..., :-1], 1 - sigmoids[..., [-1]]), dim=-1)
-        return link_mat
+        logits = logits.unsqueeze(-1)
+
+        # link_mat_0 : (N x C x 1)
+        link_mat_0 = torch.sigmoid(-logits)
+        # sigmoids : (N x C x num_cuts-1)
+        sigmoids = torch.sigmoid(self.cutpoints * self._alpha - logits)
+
+        link_mat_1 = sigmoids[..., [0]] - link_mat_0
+        link_mat = torch.cat((sigmoids[..., 1:] - sigmoids[..., :-1], 1 - sigmoids[..., [-1]]), dim=-1)
+        
+        return link_mat_0, link_mat_1, link_mat
 
     def kl_divergence(self, seg, img):
         q_dists = self._q_sample["distributions"]

@@ -13,11 +13,11 @@ train:
     kappa: 0.60
     kappa_grade: -0.5
     rate: 1.0e-2
-    alpha: 1.0e+4
+    alpha: 1.0e+3
     beta: 1
 
 test:
-  mc_n: 100
+  mc_n: 30
   batch_size: 128
 
 predict:

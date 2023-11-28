@@ -22,7 +22,7 @@ if __name__ == "__main__":
     parser.add_argument("--sample-n", type=int, default=100)
     parser.add_argument("--cfg", type=str, default="config.yaml")
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--weight", type=str, default="lightning_logs/version_2/checkpoints/epoch=281-step=3948.ckpt")
+    parser.add_argument("--weight", type=str, default="lightning_logs/version_0/checkpoints/epoch=66-step=938.ckpt")
 
     args = parser.parse_args()
     cfg = load_config(args.cfg)
@@ -57,9 +57,7 @@ if __name__ == "__main__":
 
     # Sampling
     # logits : B(N) x H x W x C+1
-    logits = lit_model.model.sample(img, 1, z_q=z_q, mean=mean)[0]
-    mask = torch.sigmoid(logits[...,[0]])
-    logits = logits[...,1:]
+    area, logits = lit_model.model.sample(img, 1, z_q=z_q, mean=mean)[0]
 
     images = []
     for th in tqdm(np.arange(0.9, 0.0, -0.1)):
@@ -68,8 +66,8 @@ if __name__ == "__main__":
             img = cv2.resize(ori_img, (256, 256))
             # preds: B(N) x H x W x C
             preds = (
-                lit_model.model.log_cumulative(logits.reshape(-1, logits.shape[-1]) + bias).argmax(-1).reshape(logits.shape)[:, :, :, :4]
-            ) * (mask >= th)
+                torch.cat(lit_model.model.log_cumulative(logits.reshape(-1, logits.shape[-1]) + bias), dim=-1).argmax(-1).reshape(logits.shape)
+            ) * (area >= th)
             easi = preds.float().mean() * 24
             preds = heatmap(img, preds)
 

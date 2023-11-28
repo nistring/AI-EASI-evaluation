@@ -80,13 +80,11 @@ def eval_perform(df, labels, predictions, binary_unc_map, grades, cohens_k):
     return pd.concat([df, results], axis=0)
 
 
-def area_score(area: float):
-    if area < 0.1:
-        return 10 * area
-    elif area < 0.9:
-        return 1 + 5 * (area - 0.1)
-    else:
-        return 5 + 10 * (area - 0.9)
+def area2score(area):
+    score = 5 + 10 * (area - 0.9)
+    score[area < 0.9] = 1 + 5 * (area[area < 0.9] - 0.1)
+    score[area < 0.1] = 10 * area[area < 0.1]
+    return score
 
 
 def create_dir(phase):
