@@ -108,15 +108,14 @@ def heatmap(ori, pred):
 
     Args:
         ori (torch.Tensor): H x W x 3
-        pred (torch.HalfTensor): N x H x W x C
+        pred (torch.HalfTensor): C x H x W x 4
 
     Returns:
         np.ndarray: C x H x W x 3
     """
     if isinstance(ori, np.ndarray):
         ori = torch.HalfTensor(ori).to(pred.device)
-    pred = (F.one_hot(pred, num_classes=4).float().mean(0)).permute(2, 0, 1, 3)
-    # pred: C x H x W x 4
+    
     return (
         torch.clamp(
             (pred[..., 1:].unsqueeze(-1) * torch.HalfTensor([[255, 64, 64], [64, 255, 64], [64, 64, 255]]).to(pred.device)).sum(-2)

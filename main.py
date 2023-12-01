@@ -21,7 +21,6 @@ import shutil
 from loader import get_dataset, CustomDataset
 from model.model import HierarchicalProbUNet
 from utils import *
-from scheduler import CosineAnnealingWarmUpRestarts
 
 
 class AtopyDataModule(pl.LightningDataModule):
@@ -72,7 +71,9 @@ class LitModel(pl.LightningModule):
         self.logger.log_hyperparams(dict(self.cfg.train))
 
     def training_step(self, batch, batch_idx):
-        seg, img, grade, _ = batch
+        seg = batch["seg"]
+        img = batch["img"]
+        grade = batch["grade"]
 
         mask = seg[:, [self.trainer.current_epoch % seg.shape[1]]]
         loss_dict = self.model.sum_loss(
@@ -84,7 +85,9 @@ class LitModel(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        seg, img, grade, _ = batch
+        seg = batch["seg"]
+        img = batch["img"]
+        grade = batch["grade"]
         for i in range(seg.shape[1]):
             for j in range(grade.shape[-1]):
                 loss_dict = self.model.sum_loss(torch.einsum("BLHW,BC->BCHW", seg[:, [i]], grade[..., j]), img, lesion_area=seg[:, [i]])
@@ -99,22 +102,53 @@ class LitModel(pl.LightningModule):
         self.kappa = []
         self.severities = []
         self.easi = []
+        self.gt_severities = []
 
     def test_step(self, batch, batch_idx):
-        seg, img, grade, ori_img = batch
+        seg = batch["seg"]
+        img = batch["img"]
+        grade = batch["grade"]  # B x C x cls_labellers
+        ori_img = batch["ori_img"]
+        file_name = batch["file_name"]
 
         # seg: B x labeller x H x W
         bs = seg.shape[0]
         labeller = seg.shape[1]
-        seg = seg.sum(1)
 
         # area: N x B x H x W x 1
         # logits/preds: N x B x H x W x C
         area, logits = self.model.sample(img, self.mc_n)
         mask = area >= 0.5
-        preds = lit_model.model.log_cumulative(logits.reshape(-1, logits.shape[-1])).argmax(-1).reshape(logits.shape) * mask
+        preds = torch.cat(self.model.log_cumulative(logits.reshape(-1, logits.shape[-1])), dim=-1).argmax(-1).reshape(logits.shape) * mask
+
         severities = torch.div(preds.sum((2, 3)), mask.sum((2, 3)))  # N x B x C
+        mask = mask.float()
         easi = area2score(mask.mean((2, 3, 4))) * severities.sum(-1)  # N x B
+        ori_img = ori_img.cpu().numpy()
+
+        # visualization
+        preds = (F.one_hot(preds, num_classes=self.cfg.model.num_classes).float().mean(0)).permute(0, 3, 1, 2, 4)  # B x C x H x W x 4
+        gt = F.one_hot(grade, num_classes=self.cfg.model.num_classes).float().mean(-2, keepdim=True).unsqueeze(-2)
+        seg_mean = seg.float().mean(1, keepdim=True)  # B x labeller x H x W
+        gt_area_score = area2score(seg.mean((-1, -2)))
+        gt = gt[..., 1:] * seg_mean.unsqueeze(-1)
+        gt = torch.cat((1 - gt.sum(-1, keepdim=True), gt), dim=-1)
+        seg_mean = (seg_mean[:, 0] * 255).cpu().numpy()  # B x H x W
+        for i in range(bs):
+            resized_ori = cv2.resize(ori_img[i], (256, 256))
+            pred_img = np.concatenate(
+                (resized_ori, np.swapaxes(np.swapaxes(heatmap(resized_ori, preds[i]), 1, 2).reshape(-1, 256, 3), 0, 1)), axis=1
+            )
+            cv2.putText(pred_img, "Prediction(E/I/Ex/L)", (10, 10), 1, 1, (0, 0, 0), 1, cv2.LINE_AA)
+            gt_img = np.concatenate(
+                (
+                    cv2.cvtColor(seg_mean[i], cv2.COLOR_GRAY2RGB),
+                    np.swapaxes(np.swapaxes(heatmap(resized_ori, gt[i]), 1, 2).reshape(-1, 256, 3), 0, 1),
+                ),
+                axis=1,
+            )
+            cv2.putText(gt_img, "Ground truth", (10, 10), 1, 1, (0, 0, 255), 1, cv2.LINE_AA)
+            cv2.imwrite(f"results/{self.exp_name}/{file_name[i]}", np.concatenate((pred_img, gt_img), axis=0))
 
         # mean/std/entropy/mi : B x H x W
         area = area.squeeze(-1)
@@ -125,35 +159,39 @@ class LitModel(pl.LightningModule):
         entropy = -(entropy * torch.log(entropy) + (1 - entropy) * torch.log(1 - entropy))
         mi = entropy + (area * torch.log(area) + (1 - area) * torch.log(1 - area)).mean(0)
 
+        seg = seg.sum(1)
         seg = seg.reshape(bs, -1)  # B x (H x W)
         seg_mask = seg.unsqueeze(0).expand(4, -1, -1)  # 4 x B x (H x W)
         mean_std_entropy_mi = torch.stack([mean, std, entropy, mi]).reshape(4, bs, -1)
         msem_list = []
         for i in range(labeller + 1):
             seg_mask_i = seg_mask == i
-            msem_list.append((mean_std_entropy_mi * seg_mask_i).sum(-1) / seg_mask_i.sum(-1))
+            msem_list.append(mean_std_entropy_mi * seg_mask_i) # 4 x B x (H x W) x 3
 
         seg = torch.stack((labeller - seg, seg), dim=-1).cpu().numpy()  # B x (H x W) x 2
 
-        self.mean_std_entropy_mi.append(torch.stack(msem_list, dim=1).cpu.numpy())  # 4(mean, std, entropy, mi) x (labeller+1) x B
-        self.kappa.extend([fleiss_kappa(seg[i]) for i in bs])  # B
+        self.mean_std_entropy_mi.append(torch.stack(msem_list, dim=1).cpu().numpy())  # 4(mean, std, entropy, mi) x (labeller+1) x B x (H x W)
+        self.kappa.extend([fleiss_kappa(seg[i]) for i in range(bs)])  # B
         self.severities.append(severities.cpu().numpy())  # N x B x C
         self.easi.append(easi.cpu().numpy())  # N x B
-        self.gt_severities.append(grade.permute(2, 0, 1).cpu.numpy())  # N x B x C
+        self.gt_severities.append(grade.permute(2, 0, 1).cpu().numpy())  # N x B x C
+        self.gt_easi.append((grade.sum(1, keepdim=True) * gt_area_score.unsqueeze(-1)).reshape(bs, -1).permute(1, 0)) # N x B
 
     def on_test_end(self):
-        self.mean_std_entropy_mi = np.stack(self.mean_std_entropy_mi, dim=-1)
+        self.mean_std_entropy_mi = np.concatenate(self.mean_std_entropy_mi, axis=-2)
+        self.mean_std_entropy_mi = self.mean_std_entropy_mi.sum((-1, -2)) / (self.mean_std_entropy_mi != 0).sum((-1, -2)) # 4 x labeller+1 x B
         results = {
             "mean": self.mean_std_entropy_mi[0],
             "std": self.mean_std_entropy_mi[1],
             "entropy": self.mean_std_entropy_mi[2],
             "mi": self.mean_std_entropy_mi[3],
-            "kappa": np.array(self.kappa),
+            "kappa": np.nan_to_num(np.array(self.kappa)),
             "severities": np.concatenate(self.severities, axis=1),
             "easi": np.concatenate(self.easi, axis=1),
             "gt_severities": np.concatenate(self.gt_severities, axis=1),
+            "gt_easi": np.concatenate(self.easi, axis=1),
         }
-        with open(f"results/{self.exp_name}/results.pickle", "wb") as f:
+        with open(f"results/{self.exp_name}/results.pkl", "wb") as f:
             pickle.dump(results, f)
 
     def on_predict_start(self):
@@ -166,6 +204,7 @@ class LitModel(pl.LightningModule):
         window = np.tile(window[:, np.newaxis], (1, 256))
         self.window = window * np.rot90(window) * np.rot90(window, 2) * np.rot90(window, 3)
 
+    @torch.jit.export
     def predict_step(self, batch, batch_idx):
         patches = batch["patches"][0]
         img = batch["ori_img"].cpu().numpy().astype(np.uint8)[0]

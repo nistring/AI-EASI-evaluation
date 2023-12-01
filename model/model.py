@@ -2,9 +2,11 @@ import torch.nn as nn
 import torch
 import torch.nn.functional as F
 from torch.distributions import Normal, Independent, kl
+from torch.distributions.distribution import Distribution
 
 from .model_utils import *
 from tqdm import tqdm
+from typing import List, Tuple, Optional
 
 eps = torch.finfo(torch.float32).eps
 
@@ -78,9 +80,11 @@ class _HierarchicalCore(nn.Module):
         self.decoder = nn.Sequential(*decoder)
         self.decoder.apply(init_weights_orthogonal_normal)
 
-    def forward(self, inputs, mean=False, z_q=None, skip_encoder=False):
-        if skip_encoder:
-            encoder_outputs = inputs
+    def forward(
+        self, z_q: List[torch.Tensor], inputs: torch.Tensor, skip_encoder: Optional[List[torch.Tensor]] = None, mean: bool = False, 
+    ) -> Tuple[List[torch.Tensor], torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
+        if skip_encoder is not None:
+            encoder_outputs = skip_encoder
         else:
             encoder_features = inputs
             encoder_outputs = []
@@ -88,13 +92,14 @@ class _HierarchicalCore(nn.Module):
             count = 0
             for encoder in self.encoder:
                 encoder_features = encoder(encoder_features)
-                if type(encoder) == Res_block:
+                if isinstance(encoder, Res_block):
                     count += 1
                 if count == self._blocks_per_level:
                     encoder_outputs.append(encoder_features)
                     count = 0
 
         decoder_features = encoder_outputs[-1]
+        decoder_output_lo = decoder_features
 
         distributions, used_latents = [], []
         if isinstance(mean, bool):
@@ -104,7 +109,7 @@ class _HierarchicalCore(nn.Module):
         features = dict()
 
         for decoder in self.decoder:
-            if type(decoder) == nn.Conv2d:
+            if isinstance(decoder, nn.Conv2d):
                 decoder_features = decoder(decoder_features)
 
                 mu = decoder_features[:, : self._latent_dims[i]]
@@ -117,26 +122,21 @@ class _HierarchicalCore(nn.Module):
                 z = dist.sample()
                 if mean[i]:
                     z = dist.mean
-                if z_q is not None:
-                    if i < len(z_q):
-                        z = z_q[i]
+
+                if i < len(z_q):
+                    z = z_q[i]
                 used_latents.append(z)
 
                 decoder_output_lo = torch.concat([z, decoder_features], dim=1)
                 i += 1
-            elif type(decoder) == Resize_up:
+            elif isinstance(decoder, Resize_up):
                 decoder_output_hi = decoder(decoder_output_lo)
                 decoder_features = torch.concat([decoder_output_hi, encoder_outputs[::-1][j + 1]], dim=1)
                 j += 1
             else:
                 decoder_features = decoder(decoder_features)
 
-        features["decoder_features"] = decoder_features
-        features["encoder_features"] = encoder_outputs
-        features["distributions"] = distributions
-        features["used_latents"] = used_latents
-
-        return features
+        return (encoder_outputs, decoder_features, distributions, used_latents)
 
 
 class _StitchingDecoder(nn.Module):
@@ -190,11 +190,11 @@ class _StitchingDecoder(nn.Module):
         )
         self.last_layer.apply(init_weights_orthogonal_normal)
 
-    def forward(self, encoder_features, decoder_features):
+    def forward(self, encoder_features: List[torch.Tensor], decoder_features: torch.Tensor) -> torch.Tensor:
         start_level = self.start_level
         for decoder in self.decoder:
             decoder_features = decoder(decoder_features)
-            if type(decoder) == Resize_up:
+            if isinstance(decoder, Resize_up):
                 encoder_feature = encoder_features[::-1][start_level]
                 decoder_features = torch.cat([decoder_features, encoder_feature], dim=1)
                 start_level += 1
@@ -286,43 +286,42 @@ class HierarchicalProbUNet(nn.Module):
         self._num_classes = num_classes
         self._num_cuts = num_cuts
 
-    def forward(self, seg, img, mean):
-        self._q_sample = self.posterior(torch.concat([seg, img], dim=1), mean=mean)
-        self._p_sample_z_q = self.prior(img, z_q=self._q_sample["used_latents"])
-        return
+    def forward(self, seg: torch.Tensor, img: torch.Tensor, mean: bool):
+        _q_sample = self.posterior(inputs=torch.concat([seg, img], dim=1), mean=mean, z_q=[])
+        _p_sample_z_q = self.prior(inputs=img, z_q=_q_sample[3])  # used_latents
+        return _q_sample, _p_sample_z_q
 
-    def sample(self, img, mc_n: int, mean=False, z_q=None):
+    @torch.jit.export
+    def sample(self, z_q: List[torch.Tensor], img: torch.Tensor, mc_n: int, mean: bool = False):
 
         with torch.no_grad():
-            prior_out = self.prior(img, mean=mean, z_q=z_q)
-            encoder_features = prior_out["encoder_features"]
-            logits = self.f_comb(encoder_features=encoder_features, decoder_features=prior_out["decoder_features"]).unsqueeze(0)
+            encoder_features, decoder_features, _, _ = self.prior(inputs=img, mean=mean, z_q=z_q)
+            logits = self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features).unsqueeze(0)
 
-            for i in tqdm(range(mc_n - 1)):
-                prior_out = self.prior(encoder_features, mean=mean, z_q=z_q, skip_encoder=True)
+            for i in range(mc_n - 1):
+                encoder_features, decoder_features, _, _ = self.prior(inputs=img, mean=mean, z_q=z_q, skip_encoder=encoder_features)
                 logits = torch.cat(
-                    self.f_comb(encoder_features=encoder_features, decoder_features=prior_out["decoder_features"]).unsqueeze(0), dim=0
-                )
+                    (logits, self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features).unsqueeze(0)),
+                    dim=0,
+                ).contiguous()
             # N x B x H x W x C
-            logits = logits.permute(0, 1, 3, 4, 2).float()
-            return torch.sigmoid(logits[...,[0]]), logits[...,1:]
+            logits = logits.permute(0, 1, 3, 4, 2).float().contiguous()
+            return torch.sigmoid(logits[:, :, :, :, [0]]).contiguous(), logits[:, :, :, :, 1:].contiguous()
 
-    def reconstruct(self, seg, img, mean):
-        self.forward(seg, img, mean)
-        prior_out = self._p_sample_z_q
-        encoder_features = prior_out["encoder_features"]
-        decoder_features = prior_out["decoder_features"]
-        return self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features)
+    def reconstruct(self, seg: torch.Tensor, img: torch.Tensor, mean: bool):
+        _q_sample, _p_sample_z_q = self.forward(seg, img, mean)
+        encoder_features, decoder_features, _, _ = _p_sample_z_q
+        return _q_sample, _p_sample_z_q, self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features)
 
-    def rec_loss(self, seg, img, lesion_area, skin_area=None, mean=False):
-        logits = self.reconstruct(torch.cat((lesion_area, seg), dim=1), img, mean=mean)
+    def rec_loss(self, seg: torch.Tensor, img: torch.Tensor, lesion_area: torch.Tensor, skin_area: Optional[torch.Tensor] = None, mean: bool = False):
+        _q_sample, _p_sample_z_q, logits = self.reconstruct(torch.cat((lesion_area, seg), dim=1), img, mean=mean)
 
         device = logits.get_device()
-        logits = logits.permute(0, 2, 3, 1)
-        seg = seg.permute(0, 2, 3, 1)
+        logits = logits.permute(0, 2, 3, 1).contiguous()
+        seg = seg.permute(0, 2, 3, 1).contiguous()
 
-        logits = torch.reshape(logits, (-1, self._num_classes + 1))
-        y_true = torch.reshape(seg, (-1, self._num_classes))
+        logits = torch.reshape(logits, (-1, self._num_classes + 1)).contiguous()
+        y_true = torch.reshape(seg, (-1, self._num_classes)).contiguous()
         lesion_area = lesion_area.reshape(
             -1,
         ).float()
@@ -341,22 +340,26 @@ class HierarchicalProbUNet(nn.Module):
         batch_size = seg.shape[0]
         link_mat_0, link_mat_1, link_mat = self.log_cumulative(logits[:, 1:])
         y_true = F.one_hot(y_true)
-        nll = -torch.log(link_mat_0 * y_true[:, :, [0]] + link_mat_1 * y_true[:, :, [1]] + (link_mat * y_true[:, :, 2:]).sum(-1, keepdim=True)).reshape(
-            batch_size, -1, self._num_classes
-        )
+        nll = -torch.log(
+            link_mat_0 * y_true[:, :, [0]] + link_mat_1 * y_true[:, :, [1]] + (link_mat * y_true[:, :, 2:]).sum(-1, keepdim=True)
+        ).reshape(batch_size, -1, self._num_classes)
 
         xe = F.binary_cross_entropy_with_logits(logits[:, 0], lesion_area, reduction="none").reshape(batch_size, -1)
 
         lesion_area = torch.reshape(lesion_area, shape=(batch_size, -1, 1))
         skin_area = torch.reshape(skin_area, shape=(batch_size, -1))
 
-        return {
-            "mean": (lesion_area * nll).sum() / lesion_area.sum() + (skin_area * xe).sum() / skin_area.sum(),
-            "sum": ((lesion_area * nll).sum((1, 2)) + (skin_area * xe).sum(dim=1)).mean(0),
-            "mask": skin_area,
-        }
+        return (
+            _q_sample,
+            _p_sample_z_q,
+            {
+                "mean": (lesion_area * nll).sum() / lesion_area.sum() + (skin_area * xe).sum() / skin_area.sum(),
+                "sum": ((lesion_area * nll).sum((1, 2)) + (skin_area * xe).sum(dim=1)).mean(0),
+                "mask": skin_area,
+            },
+        )
 
-    def log_cumulative(self, logits):
+    def log_cumulative(self, logits: torch.Tensor):
         """Convert logits to probability
         https://github.com/EthanRosenthal/spacecutter/blob/master/spacecutter/models.py
 
@@ -377,13 +380,10 @@ class HierarchicalProbUNet(nn.Module):
 
         link_mat_1 = sigmoids[..., [0]] - link_mat_0
         link_mat = torch.cat((sigmoids[..., 1:] - sigmoids[..., :-1], 1 - sigmoids[..., [-1]]), dim=-1)
-        
+
         return link_mat_0, link_mat_1, link_mat
 
-    def kl_divergence(self, seg, img):
-        q_dists = self._q_sample["distributions"]
-        p_dists = self._p_sample_z_q["distributions"]
-
+    def kl_divergence(self, seg: torch.Tensor, img: torch.Tensor, q_dists: torch.Tensor, p_dists: torch.Tensor):
         kl_dict = {}
         for level, (q, p) in enumerate(zip(q_dists, p_dists)):
             kl_per_pixel = kl.kl_divergence(p, q)
@@ -394,20 +394,20 @@ class HierarchicalProbUNet(nn.Module):
 
     def sum_loss(
         self,
-        seg,
-        img,
-        lesion_area,
-        skin_area=None,
-        mean=False,
+        seg: torch.Tensor,
+        img: torch.Tensor,
+        lesion_area: torch.Tensor,
+        skin_area: Optional[torch.Tensor] = None,
+        mean: bool = False,
     ):
         summaries = {}
 
         # rec loss
-        rec_loss = self.rec_loss(seg, img, lesion_area, skin_area, mean)
+        _q_sample, _p_sample_z_q, rec_loss = self.rec_loss(seg, img, lesion_area, skin_area, mean)
         summaries["rec_loss_mean"] = rec_loss["mean"]
 
         # kl loss
-        kl_dict = self.kl_divergence(seg, img)
+        kl_dict = self.kl_divergence(seg, img, _q_sample[2], _p_sample_z_q[2])
         kl_sum = torch.stack([kl for _, kl in kl_dict.items()], dim=-1).sum()
         summaries["kl_sum"] = kl_sum
         for level, kl in kl_dict.items():

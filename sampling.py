@@ -19,10 +19,10 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     # parser.add_argument("--img-path", type=str, default="data/train/images/Atopy_Segment_Extra/Grade2/9115.jpg")
     parser.add_argument("--img-path", type=str, default="data/train/images/Atopy_Segment_Extra/Grade1/9753.jpg")
-    parser.add_argument("--sample-n", type=int, default=100)
+    parser.add_argument("--sample-n", type=int, default=30)
     parser.add_argument("--cfg", type=str, default="config.yaml")
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--weight", type=str, default="lightning_logs/version_0/checkpoints/epoch=66-step=938.ckpt")
+    parser.add_argument("--weight", type=str, default="lightning_logs/version_3/checkpoints/epoch=486-step=6818.ckpt")
 
     args = parser.parse_args()
     cfg = load_config(args.cfg)
@@ -57,7 +57,9 @@ if __name__ == "__main__":
 
     # Sampling
     # logits : B(N) x H x W x C+1
-    area, logits = lit_model.model.sample(img, 1, z_q=z_q, mean=mean)[0]
+    area, logits = lit_model.model.sample(img, 1, z_q=z_q, mean=mean)
+    area = area[0]
+    logits = logits[0]
 
     images = []
     for th in tqdm(np.arange(0.9, 0.0, -0.1)):

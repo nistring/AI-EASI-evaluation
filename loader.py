@@ -116,7 +116,14 @@ class AtopyDataset(Dataset):
         # B x C x labellers(5)
         grade = self.anno[idx, :4].astype(np.int64)
 
-        return masks, transformed["image"], grade, img
+        sample = {
+            "seg": masks,
+            "img": transformed["image"],
+            "grade": grade,
+            "ori_img": img,
+            "file_name": os.path.basename(self.imgs[idx]).split(".")[0] + ".png"
+        }
+        return sample
 
     def __len__(self):
         return len(self.imgs)

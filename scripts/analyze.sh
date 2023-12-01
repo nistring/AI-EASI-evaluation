@@ -1,2 +1,2 @@
 # python analyze.py --exp-name extra
-python analyze.py --exp-name test
+python analyze.py --exp-name 1

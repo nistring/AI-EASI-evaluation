@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 
 def init_weights_orthogonal_normal(m):
-    if type(m) == nn.Conv2d or type(m) == nn.ConvTranspose2d:
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
         nn.init.orthogonal_(m.weight, gain=1.0)
         nn.init.trunc_normal_(m.bias, mean=0, std=0.001)
 
@@ -26,7 +26,7 @@ class Res_block(nn.Module):
         self.n_down_channels = n_down_channels
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.skip = 0
+        self.skip = nn.Identity()
 
         if self.n_down_channels is None:
             self.n_down_channels = self.out_channels
@@ -51,7 +51,7 @@ class Res_block(nn.Module):
         self.layers = nn.Sequential(*layers)
         self.layers.apply(init_weights_orthogonal_normal)
 
-    def forward(self, input_features):
+    def forward(self, input_features: torch.Tensor):
         if self.in_channels != self.out_channels:
             skip = self.skip(input_features)
         else:
@@ -64,9 +64,9 @@ class Resize_up(nn.Module):
         super(Resize_up, self).__init__()
         assert scale >= 1
         self.scale = scale
-        self.up = nn.Upsample(scale_factor=self.scale, mode='bilinear', align_corners=True)
+        self.up = nn.Upsample(scale_factor=self.scale, mode="bilinear", align_corners=True)
 
-    def forward(self, input_features):
+    def forward(self, input_features: torch.Tensor):
         return self.up(input_features)
 
 
@@ -77,5 +77,5 @@ class Resize_down(nn.Module):
         self.scale = scale
         self.down = nn.AvgPool2d((self.scale, self.scale), stride=(self.scale, self.scale), padding=0)
 
-    def forward(self, input_features):
+    def forward(self, input_features: torch.Tensor):
         return self.down(input_features)
