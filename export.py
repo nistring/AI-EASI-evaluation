@@ -32,4 +32,5 @@ litmodel = LitModel.load_from_checkpoint(
 )
 model = litmodel.model
 model.half().eval().cuda()
-torch.jit.save(torch.jit.script(model), "weights/HierarchicalProbUNet.pt")
+print(model.cutpoints * model._alpha)
+torch.jit.save(torch.jit.script(model), "weights/log_cumulative.pt")

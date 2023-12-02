@@ -119,7 +119,7 @@ class LitModel(pl.LightningModule):
         # logits/preds: N x B x H x W x C
         area, logits = self.model.sample(img, self.mc_n)
         mask = area >= 0.5
-        preds = torch.cat(self.model.log_cumulative(logits.reshape(-1, logits.shape[-1])), dim=-1).argmax(-1).reshape(logits.shape) * mask
+        preds = torch.cat(log_cumulative(logits.reshape(-1, logits.shape[-1])), dim=-1).argmax(-1).reshape(logits.shape) * mask
 
         severities = torch.div(preds.sum((2, 3)), mask.sum((2, 3)))  # N x B x C
         mask = mask.float()
@@ -204,7 +204,7 @@ class LitModel(pl.LightningModule):
         window = np.tile(window[:, np.newaxis], (1, 256))
         self.window = window * np.rot90(window) * np.rot90(window, 2) * np.rot90(window, 3)
 
-    @torch.jit.export
+
     def predict_step(self, batch, batch_idx):
         patches = batch["patches"][0]
         img = batch["ori_img"].cpu().numpy().astype(np.uint8)[0]
@@ -238,7 +238,7 @@ class LitModel(pl.LightningModule):
         # Post processing
         lesion_area = (lesion_area >= 0.5) * mask
         preds = (
-            lit_model.model.log_cumulative(severities.reshape(-1, severities.shape[-1])).argmax(-1).reshape(severities.shape) * lesion_area
+            log_cumulative(severities.reshape(-1, severities.shape[-1])).argmax(-1).reshape(severities.shape) * lesion_area
         )
         severities = torch.div(preds.sum((2, 3)), lesion_area.sum((2, 3)))  # N x C
         areas = lesion_area.sum((2, 3)) / mask.sum()  # N
@@ -267,8 +267,8 @@ class LitModel(pl.LightningModule):
                 1,
                 cv2.LINE_AA,
             )
-        os.makedirs("results/predict", exist_ok=True)
-        cv2.imwrite(os.path.join("results/predict", file_name), img)
+        
+        return img
 
 
 if __name__ == "__main__":

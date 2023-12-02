@@ -10,6 +10,32 @@ def init_weights_orthogonal_normal(m):
         nn.init.trunc_normal_(m.bias, mean=0, std=0.001)
 
 
+def log_cumulative(cutpoints, logits: torch.Tensor):
+    """Convert logits to probability
+    https://github.com/EthanRosenthal/spacecutter/blob/master/spacecutter/models.py
+
+    Args:
+        logits (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
+    # logits : (N x C)
+    # cutpoints : (C x num_cuts)
+    logits = logits.unsqueeze(-1)
+
+    # link_mat_0 : (N x C x 1)
+    link_mat_0 = torch.sigmoid(-logits)
+
+    # sigmoids : (N x C x num_cuts-1)
+    sigmoids = torch.sigmoid(cutpoints - logits)
+
+    link_mat_1 = sigmoids[..., 0:1] - link_mat_0
+    link_mat = torch.cat((sigmoids[..., 1:] - sigmoids[..., :-1], 1 - sigmoids[..., -1:]), dim=-1)
+
+    return link_mat_0, link_mat_1, link_mat
+
+
 class Res_block(nn.Module):
     def __init__(
         self,

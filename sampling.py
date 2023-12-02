@@ -22,7 +22,7 @@ if __name__ == "__main__":
     parser.add_argument("--sample-n", type=int, default=30)
     parser.add_argument("--cfg", type=str, default="config.yaml")
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--weight", type=str, default="lightning_logs/version_3/checkpoints/epoch=486-step=6818.ckpt")
+    parser.add_argument("--weight", type=str, default="weights/lr_e-5_exdecay_0.99/checkpoints/epoch=486-step=6818.ckpt")
 
     args = parser.parse_args()
     cfg = load_config(args.cfg)
@@ -50,14 +50,11 @@ if __name__ == "__main__":
     img = img.expand(args.sample_n, -1, -1, -1).to(args.device)
 
     # Designate latent variables
-    # z_q = torch.linspace(0, 3, args.sample_n).reshape(1, -1, 1, 1, 1).to(args.device)  # None
     # mean = True  # None
-    z_q = None
-    mean = [False, False, False, False]
 
     # Sampling
     # logits : B(N) x H x W x C+1
-    area, logits = lit_model.model.sample(img, 1, z_q=z_q, mean=mean)
+    area, logits = lit_model.model.sample(img, 1)
     area = area[0]
     logits = logits[0]
 
@@ -70,7 +67,7 @@ if __name__ == "__main__":
             preds = (
                 torch.cat(lit_model.model.log_cumulative(logits.reshape(-1, logits.shape[-1]) + bias), dim=-1).argmax(-1).reshape(logits.shape)
             ) * (area >= th)
-            easi = preds.float().mean() * 24
+            preds = (F.one_hot(preds, num_classes=4).float().mean(0)).permute(2, 0, 1, 3)  # C x H x W x 4
             preds = heatmap(img, preds)
 
             result = np.concatenate([img] + [preds[i] for i in range(preds.shape[0])], axis=1)
@@ -94,17 +91,7 @@ if __name__ == "__main__":
                 1,
                 cv2.LINE_AA,
             )
-            cv2.putText(
-                result,
-                f"EASI: {easi:.2f}",
-                (10, 75),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 0, 0),
-                1,
-                cv2.LINE_AA,
-            )
-            
+
             for i, text in enumerate(("Erythema", "Induration", "Excoriation", "Lichenification")):
                 cv2.putText(
                     result,
