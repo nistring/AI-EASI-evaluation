@@ -13,6 +13,6 @@ PyYAML==6.0.1
 scipy==1.6.3
 streamlit==1.29.0
 streamlit_image_coordinates==0.1.6
-torch==2.1.1+cu118
-torchvision==0.16.1+cu118
+torch==2.1.1
+torchvision==0.16.1
 tqdm==4.64.1
