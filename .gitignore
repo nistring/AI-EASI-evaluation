@@ -160,9 +160,8 @@ cython_debug/
 #.idea/
 
 data
-weights
+weights/lr_e-5_exdecay_0.99
 results
-*.pt
 nohup.out
 lightning_logs/
 vis
