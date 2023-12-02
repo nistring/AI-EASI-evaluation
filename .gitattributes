@@ -1,0 +1,2 @@
+weights/BiSeNetV2.pt filter=lfs diff=lfs merge=lfs -text
+weights/HierarchicalProbUNet.pt filter=lfs diff=lfs merge=lfs -text
