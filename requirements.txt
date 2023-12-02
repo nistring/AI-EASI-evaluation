@@ -10,10 +10,7 @@ pandas==1.5.2
 patchify==0.2.3
 pytorch_ignite==0.4.13
 PyYAML==6.0.1
-scikit_learn==0.24.2
 scipy==1.6.3
-seaborn==0.10.0
-statsmodels==0.11.1
 streamlit==1.29.0
 streamlit_image_coordinates==0.1.6
 torch==2.1.1+cu118
