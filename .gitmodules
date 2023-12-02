@@ -1,3 +1,0 @@
-[submodule "SemanticSegmentation"]
-	path = SemanticSegmentation
-	url = https://github.com/nistring/SemanticSegmentation.git
