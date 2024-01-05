@@ -29,10 +29,10 @@ class AtopyDataModule(pl.LightningDataModule):
         self.cfg = cfg
 
     def setup(self, stage):
-        self.train, self.val = get_dataset("Atopy_Segment_Train")
-        self.test = get_dataset("Atopy_Segment_Test")
-        # self.test = get_dataset("Atopy_Segment_Extra")
-        self.predict = CustomDataset("data/predict", step=self.cfg.predict.step)
+        self.train, self.val = get_dataset("train")
+        self.test = get_dataset("intra")
+        # self.test = get_dataset("extra")
+        # self.predict = CustomDataset("data/predict", step=self.cfg.predict.step)
 
     def train_dataloader(self):
         return DataLoader(
@@ -49,8 +49,8 @@ class AtopyDataModule(pl.LightningDataModule):
     def test_dataloader(self):
         return DataLoader(self.test, batch_size=self.cfg.test.batch_size, num_workers=self.cfg.num_workers, pin_memory=True)
 
-    def predict_dataloader(self):
-        return DataLoader(self.predict, batch_size=1, num_workers=self.cfg.num_workers, pin_memory=True)
+    # def predict_dataloader(self):
+    #     return DataLoader(self.predict, batch_size=1, num_workers=self.cfg.num_workers, pin_memory=True)
 
 
 class LitModel(pl.LightningModule):

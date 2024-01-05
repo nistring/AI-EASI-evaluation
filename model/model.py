@@ -111,16 +111,16 @@ class _HierarchicalCore(nn.Module):
                 log_sigma = F.softplus(decoder_features[:, self._latent_dims[q] :]) + 1.192e-07
 
                 # For training
-                # dist = Normal(loc=mu, scale=log_sigma)
-                # z = dist.sample()
-                # if mean[q]:
-                #     z = dist.mean
-                # if z_q is not None:
-                #     z = z_q[q]
-                # distributions.append(dist)
+                dist = Normal(loc=mu, scale=log_sigma)
+                z = dist.sample()
+                if mean[q]:
+                    z = dist.mean
+                if z_q:
+                    z = z_q[q]
+                distributions.append(dist)
 
                 # For compiling
-                z = torch.normal(mu, log_sigma)
+                # z = torch.normal(mu, log_sigma)
                 
                 used_latents.append(z)
 
