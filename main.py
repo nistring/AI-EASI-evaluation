@@ -6,6 +6,7 @@ import lightning.pytorch as pl
 from lightning.pytorch.callbacks import (
     EarlyStopping,
     ModelCheckpoint,
+    LearningRateMonitor
 )
 
 from argparse import ArgumentParser
@@ -61,10 +62,13 @@ class LitModel(pl.LightningModule):
         self.mc_n = cfg.test.mc_n
         self.exp_name = exp_name
         self.cfg.exp_date = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
+        self.automatic_optimization = False
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.cfg.train.lr, weight_decay=self.cfg.train.weight_decay)
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.cfg.train.gamma)
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=self.cfg.train.gamma)
+        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=self.cfg.train.gamma)
         return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
     def on_train_start(self):
@@ -82,7 +86,12 @@ class LitModel(pl.LightningModule):
         loss = loss_dict["supervised_loss"]
         summaries = loss_dict["summaries"]
         self.log_dict({"train_" + k: v for k, v in summaries.items()}, sync_dist=True)
-        return loss
+
+        # manual optimization
+        opt = self.optimizers()
+        opt.zero_grad()
+        self.manual_backward(loss)
+        opt.step()
 
     def validation_step(self, batch, batch_idx):
         seg = batch["seg"]
@@ -95,6 +104,15 @@ class LitModel(pl.LightningModule):
                 summaries = loss_dict["summaries"]
 
                 self.log_dict({"val_" + k: v for k, v in summaries.items()}, sync_dist=True)
+
+    def on_validation_epoch_end(self):
+        sch = self.lr_schedulers()
+
+        # If the selected scheduler is a ReduceLROnPlateau scheduler.
+        if isinstance(sch, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            sch.step(self.trainer.callback_metrics["val_loss_mean"])
+        else:
+            sch.step()
 
     def on_test_start(self):
         self.logger.log_hyperparams(dict(self.cfg.test))
@@ -296,16 +314,16 @@ if __name__ == "__main__":
     # train
     if args.phase == "train":
         litmodel = LitModel(model, cfg=cfg)
-        checkpoint_callback = ModelCheckpoint(monitor="val_loss")
+        checkpoint_callback = ModelCheckpoint(monitor="val_loss_mean")
+        lr_monitor = LearningRateMonitor(logging_interval="step")
         trainer = pl.Trainer(
             max_epochs=cfg.train.max_epochs,
             devices=args.devices,
             accelerator="gpu",
             strategy="ddp_find_unused_parameters_true",
-            callbacks=[checkpoint_callback],
+            callbacks=[checkpoint_callback, lr_monitor],
             log_every_n_steps=10,
             profiler="advanced",
-            gradient_clip_val=0.5,
         )
         if args.checkpoint:
             trainer.fit(litmodel, datamodule=atopy, ckpt_path=args.checkpoint)

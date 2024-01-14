@@ -386,6 +386,7 @@ class HierarchicalProbUNet(nn.Module):
         summaries["kl_sum"] = kl_sum
         for level, kl in kl_dict.items():
             summaries["kl_{}".format(level)] = kl
+        summaries["loss_mean"] = summaries["rec_loss_mean"] + summaries["kl_sum"]
 
         mask_sum_per_instance = rec_loss["mask"].sum(dim=-1)
         num_valid_pixels = mask_sum_per_instance.mean()
