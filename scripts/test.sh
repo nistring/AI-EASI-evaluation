@@ -1,1 +1,1 @@
-python main.py --phase test --checkpoint weights/lr_e-5_exdecay_0.99/checkpoints/epoch=486-step=6818.ckpt --devices 1
+python main.py --phase test --checkpoint lightning_logs/version_1/checkpoints/epoch=23-step=1440.ckpt --devices 1 --test-dataset "extra"

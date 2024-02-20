@@ -19,30 +19,29 @@ image_size = 256
 
 train_transforms = A.Compose(
     [
-        A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.5),
-        A.GaussNoise(p=0.5),
-        A.OneOf([A.MotionBlur(blur_limit=15, p=0.2), A.MedianBlur(blur_limit=15, p=0.1), A.Blur(blur_limit=15, p=0.1)], p=0.5),
-        A.RandomBrightnessContrast(brightness_limit=0.25, contrast_limit=0.25),
-        A.RandomGamma(gamma_limit=(75, 125)),
+        A.HorizontalFlip(),
+        A.VerticalFlip(),
+        A.GaussNoise(),
+        A.Blur(),
+        A.RandomBrightnessContrast(),
+        A.RandomGamma(),
         A.Perspective(),
-        A.OneOf(
-            [
-                A.GridDistortion(border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
-                A.ElasticTransform(border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
-                A.OpticalDistortion(border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
-            ],
-            p=0.5,
-        ),
-        A.ShiftScaleRotate(border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0, shift_limit=[-0.25, 0.25], scale_limit=[-0.5, 1.0]),
+        # A.OneOf(
+        #     [
+        #         A.GridDistortion(),
+        #         A.ElasticTransform(),
+        #         A.OpticalDistortion(),
+        #     ]
+        # ),
+        A.ShiftScaleRotate(border_mode=cv2.BORDER_CONSTANT, value=0.),
         A.Resize(image_size, image_size),
-        A.Normalize(mean=(0.4470, 0.5332, 0.7017), std=(0.1182, 0.1158, 0.1212)),
+        A.Normalize(mean=(0.4461, 0.5334, 0.7040), std=(0.1161, 0.1147, 0.1204)),
         ToTensorV2(),
     ]
 )
 
 test_transforms = A.Compose(
-    [A.Resize(image_size, image_size), A.Normalize(mean=(0.4470, 0.5332, 0.7017), std=(0.1182, 0.1158, 0.1212)), ToTensorV2()]
+    [A.Resize(image_size, image_size), A.Normalize(mean=(0.4461, 0.5334, 0.7040), std=(0.1161, 0.1147, 0.1204)), ToTensorV2()]
 )
 
 
@@ -88,16 +87,16 @@ class CustomDataset(Dataset):
 
 
 class AtopyDataset(Dataset):
-    def __init__(self, img_path, mask_path, class_path, transforms, idx=None):
+    def __init__(self, img_path, mask_path, class_path, transforms, idx):
         self.transforms = transforms
         self.img_path = img_path
         self.mask_path = mask_path
-        self.idx = idx if idx is not None else os.listdir(mask_path)
+        self.idx = idx
 
         with open(class_path, "rb") as f:
             data = pickle.load(f)
             index = list(data["index"])
-        self.anno = data["annotations"][[index.index(int(os.path.basename(x).split(".")[0])) for x in self.idx]]
+        self.anno = data["annotations"][[index.index(os.path.basename(x).split(".")[0]) for x in self.idx]]
 
         self.labellers = [filename for filename in os.listdir(mask_path) if os.path.isdir(os.path.join(mask_path, filename))]
         if not self.labellers:
@@ -135,25 +134,6 @@ class AtopyDataset(Dataset):
         return len(self.idx)
 
 
-# def get_file_list(phase):
-#     labellers = os.listdir("data/2019/labels")
-
-#     imgs = []
-#     masks = []
-
-#     intersection = []
-#     for labeller in labellers:
-#         intersection.append(set(map(lambda x: x.split(".")[0], os.listdir(os.path.join("data/2019/labels", labeller, phase)))))
-#     intersection.append(set(map(lambda x: x.split(".")[0], os.listdir(os.path.join("data/2019/images", phase)))))
-#     intersection = sorted(list(functools.reduce(lambda a, b: a & b, intersection)))
-
-#     imgs.extend(list(map(lambda x: os.path.join("data/2019/images", phase, x + ".jpg"), intersection)))
-#     masks.extend(list(map(lambda x: os.path.join(phase, x + ".png"), intersection)))
-#     print(phase, len(intersection))
-
-#     return len(imgs), np.array(imgs), np.array(masks)
-
-
 def get_dataset(dataset_name, split_ratio=0.2):
 
     # total_num_samples, imgs, masks = get_file_list(phase)
@@ -167,13 +147,13 @@ def get_dataset(dataset_name, split_ratio=0.2):
             "data/2019/labels/Atopy_Segment_Intra",
             "data/2019/classes/meta_result.pkl",
             train_transforms,
-            idx=train_idx,
+            train_idx,
         ), AtopyDataset(
             "data/2019/images/Atopy_Segment_Intra",
             "data/2019/labels/Atopy_Segment_Intra",
             "data/2019/classes/meta_result.pkl",
             test_transforms,
-            idx=val_ix,
+            val_ix,
         )
     elif dataset_name == "intra":
         with open("data/2019/classes/test.txt", "r") as f:
@@ -183,7 +163,7 @@ def get_dataset(dataset_name, split_ratio=0.2):
             "data/2019/labels/Atopy_Segment_Intra",
             "data/2019/classes/meta_result.pkl",
             test_transforms,
-            idx=test_idx,
+            test_idx,
         )
     elif dataset_name == "extra":
         return AtopyDataset(
@@ -191,6 +171,7 @@ def get_dataset(dataset_name, split_ratio=0.2):
             "data/2019/labels/Atopy_Segment_Extra",
             "data/2019/classes/meta_result.pkl",
             test_transforms,
+            os.listdir("data/2019/labels/Atopy_Segment_Extra/동현"),
         )
     elif dataset_name == "2020":
         return AtopyDataset(
@@ -198,13 +179,15 @@ def get_dataset(dataset_name, split_ratio=0.2):
             "data/2020_피부질환_H1_전향적_아토피_분당서울대병원/labels/lesion_area",
             "data/2020_피부질환_H1_전향적_아토피_분당서울대병원/classes/meta_result.pkl",
             test_transforms,
+            os.listdir("data/2020_피부질환_H1_전향적_아토피_분당서울대병원/labels/lesion_area"),
         )
     elif dataset_name == "2021":
         return AtopyDataset(
             "data/2021_소아청소년_H1_전향적_아토피피부염_분당서울대병원/images",
-            "data/2021_소아청소년_H1_전향적_아토피피부염_분당서울대병원/labels/lesion_rea",
+            "data/2021_소아청소년_H1_전향적_아토피피부염_분당서울대병원/labels/lesion_area",
             "data/2021_소아청소년_H1_전향적_아토피피부염_분당서울대병원/classes/meta_result.pkl",
             test_transforms,
+            os.listdir("data/2021_소아청소년_H1_전향적_아토피피부염_분당서울대병원/labels/lesion_area"),
         )
     else:
         raise ValueError()

@@ -1,38 +1,34 @@
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 import torch.nn.functional as F
 
 import lightning.pytorch as pl
-from lightning.pytorch.callbacks import (
-    EarlyStopping,
-    ModelCheckpoint,
-    LearningRateMonitor
-)
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 
 from argparse import ArgumentParser
 import os
 import cv2
 import numpy as np
 from statsmodels.stats.inter_rater import fleiss_kappa
-import pandas as pd
-from copy import deepcopy
 from datetime import datetime
 import shutil
 
-from loader import get_dataset, CustomDataset
+from loader import get_dataset
 from model.model import HierarchicalProbUNet
+from model.model_utils import log_cumulative
 from utils import *
 
 
 class AtopyDataModule(pl.LightningDataModule):
-    def __init__(self, cfg):
+    def __init__(self, cfg, test_dataset):
         super().__init__()
         self.cfg = cfg
+        self.test_dataset = test_dataset
 
     def setup(self, stage):
         self.train, self.val = get_dataset("train")
-        self.test = get_dataset("intra")
-        # self.test = get_dataset("extra")
+        # self.test = get_dataset("intra")
+        self.test = get_dataset(self.test_dataset)
         # self.predict = CustomDataset("data/predict", step=self.cfg.predict.step)
 
     def train_dataloader(self):
@@ -61,13 +57,12 @@ class LitModel(pl.LightningModule):
         self.cfg = cfg
         self.mc_n = cfg.test.mc_n
         self.exp_name = exp_name
-        self.cfg.exp_date = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
         self.automatic_optimization = False
+        self.cfg.exp_date = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.cfg.train.lr, weight_decay=self.cfg.train.weight_decay)
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.cfg.train.gamma)
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=self.cfg.train.gamma)
         # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=self.cfg.train.gamma)
         return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
@@ -75,142 +70,120 @@ class LitModel(pl.LightningModule):
         self.logger.log_hyperparams(dict(self.cfg.train))
 
     def training_step(self, batch, batch_idx):
-        seg = batch["seg"]
-        img = batch["img"]
-        grade = batch["grade"]
-
-        mask = seg[:, [self.trainer.current_epoch % seg.shape[1]]]
-        loss_dict = self.model.sum_loss(
-            torch.einsum("BLHW,BC->BCHW", mask, grade[..., self.trainer.current_epoch % grade.shape[-1]]), img, lesion_area=mask
-        )
-        loss = loss_dict["supervised_loss"]
-        summaries = loss_dict["summaries"]
-        self.log_dict({"train_" + k: v for k, v in summaries.items()}, sync_dist=True)
-
-        # manual optimization
+        seg = batch["seg"]  # B x labeller x H x W
+        img = batch["img"]  # B x C x H x W
+        grade = batch["grade"]  # B x C x cls_labellers
         opt = self.optimizers()
-        opt.zero_grad()
-        self.manual_backward(loss)
-        opt.step()
 
-    def validation_step(self, batch, batch_idx):
-        seg = batch["seg"]
-        img = batch["img"]
-        grade = batch["grade"]
+        summaries = None
         for i in range(seg.shape[1]):
             for j in range(grade.shape[-1]):
-                loss_dict = self.model.sum_loss(torch.einsum("BLHW,BC->BCHW", seg[:, [i]], grade[..., j]), img, lesion_area=seg[:, [i]])
-                loss = loss_dict["supervised_loss"]
-                summaries = loss_dict["summaries"]
+                # B1HW, BC11 -> BCHW
+                loss_dict = self.model.sum_loss(seg[:, [i]] * grade[:, :, [j], None], img)
 
-                self.log_dict({"val_" + k: v for k, v in summaries.items()}, sync_dist=True)
+                # Backward
+                opt.zero_grad()
+                self.manual_backward(loss_dict["supervised_loss"])
+                self.clip_gradients(opt, gradient_clip_val=0.5, gradient_clip_algorithm="norm")
+                opt.step()
 
-    def on_validation_epoch_end(self):
+                if summaries is None:
+                    summaries = loss_dict["summaries"]
+                else:
+                    for k, v in loss_dict["summaries"].items():
+                        summaries[k] += v
+        for k, v in summaries.items():
+            summaries[k] = v / seg.shape[1] / grade.shape[-1]
+
+        self.log_dict(
+            {"train_" + k: v for k, v in summaries.items()}, sync_dist=True, on_epoch=True, on_step=False, batch_size=seg.shape[0]
+        )
+
+    def on_train_epoch_end(self):
         sch = self.lr_schedulers()
+        sch.step()
 
-        # If the selected scheduler is a ReduceLROnPlateau scheduler.
-        if isinstance(sch, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            sch.step(self.trainer.callback_metrics["val_loss_mean"])
-        else:
-            sch.step()
+    def validation_step(self, batch, batch_idx):
+        seg = batch["seg"]  # B x labeller x H x W
+        img = batch["img"]  # B x C x H x W
+        grade = batch["grade"]  # B x C x cls_labellers
+        summaries = None
+        for i in range(seg.shape[1]):
+            for j in range(grade.shape[-1]):
+                # B1HW, BC11 -> BCHW
+                loss_dict = self.model.sum_loss(seg[:, [i]] * grade[:, :, [j], None], img)
+                if summaries is None:
+                    summaries = loss_dict["summaries"]
+                else:
+                    for k, v in loss_dict["summaries"].items():
+                        summaries[k] += v
+        for k, v in summaries.items():
+            summaries[k] = v / seg.shape[1] / grade.shape[-1]
+
+        self.log_dict({"val_" + k: v for k, v in summaries.items()}, sync_dist=True, on_epoch=True, on_step=False, batch_size=seg.shape[0])
 
     def on_test_start(self):
         self.logger.log_hyperparams(dict(self.cfg.test))
-        self.mean_std_entropy_mi = []
-        self.kappa = []
-        self.severities = []
-        self.easi = []
-        self.gt_severities = []
+        self.EIExL = []
+        self.EIExL_std = []
+        self.gt_EIExL = []
+        self.gt_EIExL_std = []
 
     def test_step(self, batch, batch_idx):
-        seg = batch["seg"]
-        img = batch["img"]
+        seg = batch["seg"]  # B x labeller x H x W
+        img = batch["img"]  # B x 3 x H x W
         grade = batch["grade"]  # B x C x cls_labellers
         ori_img = batch["ori_img"]
         file_name = batch["file_name"]
 
-        # seg: B x labeller x H x W
-        bs = seg.shape[0]
-        labeller = seg.shape[1]
+        H, W = img.shape[2:]
+        B, C = grade.shape[:2]
+        num_classes = self.cfg.model.num_classes
 
-        # area: N x B x H x W x 1
-        # logits/preds: N x B x H x W x C
-        area, logits = self.model.sample(img, self.mc_n)
-        mask = area >= 0.5
-        preds = torch.cat(log_cumulative(logits.reshape(-1, logits.shape[-1])), dim=-1).argmax(-1).reshape(logits.shape) * mask
+        preds = self.model.sample(img, self.mc_n)  # N x B x H x W x C
+        gt = seg.reshape((B, 1, 1, -1, H, W)) * grade.reshape((B, C, -1, 1, 1, 1))  # B x C x _ x _ H x W
+        gt_EIExL_std = gt.float().std((2, 3)).mean((2, 3))  # B x C
+        gt = F.one_hot(gt, num_classes=num_classes).float().mean((2, 3))  # B x C x H x W x 4
+        area = preds.bool().float().mean((2, 3))
+        EIExL = preds.float().mean((2, 3)) * area2score(area) / area  # N x B x C
+        EIExL_std = preds.float().std(0).mean((1, 2))  # B x C
+        gt_EIExL = (
+            (grade.unsqueeze(-1) * area2score(seg.float().mean((2, 3))).reshape((B, 1, 1, -1))).reshape((B, C, -1)).permute(2, 0, 1)
+        )  # N x B x C
 
-        severities = torch.div(preds.sum((2, 3)), mask.sum((2, 3)))  # N x B x C
-        mask = mask.float()
-        easi = area2score(mask.mean((2, 3, 4))) * severities.sum(-1)  # N x B
-        ori_img = ori_img.cpu().numpy()
+        self.EIExL.append(np.nan_to_num(EIExL.cpu().numpy()))
+        self.EIExL_std.append(EIExL_std.cpu().numpy())
+        self.gt_EIExL.append(gt_EIExL.cpu().numpy())
+        self.gt_EIExL_std.append(gt_EIExL_std.cpu().numpy())
 
         # visualization
+        ori_img = ori_img.cpu().numpy()
         preds = (F.one_hot(preds, num_classes=self.cfg.model.num_classes).float().mean(0)).permute(0, 3, 1, 2, 4)  # B x C x H x W x 4
-        gt = F.one_hot(grade, num_classes=self.cfg.model.num_classes).float().mean(-2, keepdim=True).unsqueeze(-2)
-        seg_mean = seg.float().mean(1, keepdim=True)  # B x labeller x H x W
-        gt_area_score = area2score(seg.mean((-1, -2)))
-        gt = gt[..., 1:] * seg_mean.unsqueeze(-1)
-        gt = torch.cat((1 - gt.sum(-1, keepdim=True), gt), dim=-1)
-        seg_mean = (seg_mean[:, 0] * 255).cpu().numpy()  # B x H x W
-        for i in range(bs):
+        for i in range(B):
             resized_ori = cv2.resize(ori_img[i], (256, 256))
             pred_img = np.concatenate(
                 (resized_ori, np.swapaxes(np.swapaxes(heatmap(resized_ori, preds[i]), 1, 2).reshape(-1, 256, 3), 0, 1)), axis=1
             )
-            cv2.putText(pred_img, "Prediction(E/I/Ex/L)", (10, 10), 1, 1, (0, 0, 0), 1, cv2.LINE_AA)
             gt_img = np.concatenate(
                 (
-                    cv2.cvtColor(seg_mean[i], cv2.COLOR_GRAY2RGB),
+                    np.ones_like(resized_ori) * 255,
                     np.swapaxes(np.swapaxes(heatmap(resized_ori, gt[i]), 1, 2).reshape(-1, 256, 3), 0, 1),
                 ),
                 axis=1,
             )
-            cv2.putText(gt_img, "Ground truth", (10, 10), 1, 1, (0, 0, 255), 1, cv2.LINE_AA)
             cv2.imwrite(f"results/{self.exp_name}/{file_name[i]}", np.concatenate((pred_img, gt_img), axis=0))
 
-        # mean/std/entropy/mi : B x H x W
-        area = area.squeeze(-1)
-        mask = mask.squeeze(-1)
-        mean = mask.mean(0)
-        std = mask.std(0)
-        entropy = area.mean(0)
-        entropy = -(entropy * torch.log(entropy) + (1 - entropy) * torch.log(1 - entropy))
-        mi = entropy + (area * torch.log(area) + (1 - area) * torch.log(1 - area)).mean(0)
-
-        seg = seg.sum(1)
-        seg = seg.reshape(bs, -1)  # B x (H x W)
-        seg_mask = seg.unsqueeze(0).expand(4, -1, -1)  # 4 x B x (H x W)
-        mean_std_entropy_mi = torch.stack([mean, std, entropy, mi]).reshape(4, bs, -1)
-        msem_list = []
-        for i in range(labeller + 1):
-            seg_mask_i = seg_mask == i
-            msem_list.append(mean_std_entropy_mi * seg_mask_i) # 4 x B x (H x W) x 3
-
-        seg = torch.stack((labeller - seg, seg), dim=-1).cpu().numpy()  # B x (H x W) x 2
-
-        self.mean_std_entropy_mi.append(torch.stack(msem_list, dim=1).cpu().numpy())  # 4(mean, std, entropy, mi) x (labeller+1) x B x (H x W)
-        self.kappa.extend([fleiss_kappa(seg[i]) for i in range(bs)])  # B
-        self.severities.append(severities.cpu().numpy())  # N x B x C
-        self.easi.append(easi.cpu().numpy())  # N x B
-        self.gt_severities.append(grade.permute(2, 0, 1).cpu().numpy())  # N x B x C
-        self.gt_easi.append((grade.sum(1, keepdim=True) * gt_area_score.unsqueeze(-1)).reshape(bs, -1).permute(1, 0)) # N x B
-
     def on_test_end(self):
-        self.mean_std_entropy_mi = np.concatenate(self.mean_std_entropy_mi, axis=-2)
-        self.mean_std_entropy_mi = self.mean_std_entropy_mi.sum((-1, -2)) / (self.mean_std_entropy_mi != 0).sum((-1, -2)) # 4 x labeller+1 x B
-        results = {
-            "mean": self.mean_std_entropy_mi[0],
-            "std": self.mean_std_entropy_mi[1],
-            "entropy": self.mean_std_entropy_mi[2],
-            "mi": self.mean_std_entropy_mi[3],
-            "kappa": np.nan_to_num(np.array(self.kappa)),
-            "severities": np.concatenate(self.severities, axis=1),
-            "easi": np.concatenate(self.easi, axis=1),
-            "gt_severities": np.concatenate(self.gt_severities, axis=1),
-            "gt_easi": np.concatenate(self.easi, axis=1),
-        }
         with open(f"results/{self.exp_name}/results.pkl", "wb") as f:
-            pickle.dump(results, f)
+            pickle.dump(
+                {
+                    "EIExL": np.concatenate(self.EIExL, axis=1),  # N x B x C
+                    "EIExL_std": np.concatenate(self.EIExL_std, axis=0),  # B x C
+                    "gt_EIExL": np.concatenate(self.gt_EIExL, axis=1),  # N x B x C
+                    "gt_EIExL_std": np.concatenate(self.gt_EIExL_std, axis=0),  # B x C
+                },
+                f,
+            )
 
     def on_predict_start(self):
         self.logger.log_hyperparams(dict(self.cfg.predict))
@@ -221,7 +194,6 @@ class LitModel(pl.LightningModule):
         window[: 256 - self.step] = np.arange(256 - self.step) / self.step
         window = np.tile(window[:, np.newaxis], (1, 256))
         self.window = window * np.rot90(window) * np.rot90(window, 2) * np.rot90(window, 3)
-
 
     def predict_step(self, batch, batch_idx):
         patches = batch["patches"][0]
@@ -242,7 +214,7 @@ class LitModel(pl.LightningModule):
         severities = np.zeros(
             (self.mc_n, patches.shape[1] * self.step + 256, patches.shape[2] * self.step + 256, self.cfg.model.num_classes)
         )
-        lesion_area = np.zeros(severity_logits.shape[:-1])
+        lesion_area = np.zeros(severities.shape[:-1])
 
         # Inference with patch batch
         for i in range(len(valid) // bs + 1):
@@ -255,9 +227,7 @@ class LitModel(pl.LightningModule):
 
         # Post processing
         lesion_area = (lesion_area >= 0.5) * mask
-        preds = (
-            log_cumulative(severities.reshape(-1, severities.shape[-1])).argmax(-1).reshape(severities.shape) * lesion_area
-        )
+        preds = log_cumulative(severities.reshape(-1, severities.shape[-1])).argmax(-1).reshape(severities.shape) * lesion_area
         severities = torch.div(preds.sum((2, 3)), lesion_area.sum((2, 3)))  # N x C
         areas = lesion_area.sum((2, 3)) / mask.sum()  # N
         easi = area2score(areas) * severities.sum(1)  # N
@@ -285,22 +255,28 @@ class LitModel(pl.LightningModule):
                 1,
                 cv2.LINE_AA,
             )
-        
+
         return img
 
 
 if __name__ == "__main__":
+    # env
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+    torch.set_float32_matmul_precision("high")
+
     # arguments
     parser = ArgumentParser()
     parser.add_argument("--devices", type=int, default=1)
     parser.add_argument("--phase", type=str, choices=["train", "test", "predict"])
     parser.add_argument("--checkpoint", type=str, help="Path to checkpoint")
     parser.add_argument("--cfg", type=str, default="config.yaml")
+    parser.add_argument("--test-dataset", type=str, default="intra")
     args = parser.parse_args()
     cfg = load_config(args.cfg)
 
     # dataset
-    atopy = AtopyDataModule(cfg)
+    atopy = AtopyDataModule(cfg, args.test_dataset)
 
     # model
     model = HierarchicalProbUNet(
@@ -322,8 +298,7 @@ if __name__ == "__main__":
             accelerator="gpu",
             strategy="ddp_find_unused_parameters_true",
             callbacks=[checkpoint_callback, lr_monitor],
-            log_every_n_steps=10,
-            profiler="advanced",
+            log_every_n_steps=1,
         )
         if args.checkpoint:
             trainer.fit(litmodel, datamodule=atopy, ckpt_path=args.checkpoint)

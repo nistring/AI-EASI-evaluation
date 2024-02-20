@@ -18,7 +18,6 @@ class _HierarchicalCore(nn.Module):
         activation_fn=nn.ReLU(),
         convs_per_block=3,
         blocks_per_level=3,
-        name="HierarchicalDecoderDist",
     ):
         super(_HierarchicalCore, self).__init__()
         self._latent_dims = latent_dims
@@ -32,7 +31,6 @@ class _HierarchicalCore(nn.Module):
             self._dowm_channels_per_block = channels_per_block
         else:
             self._dowm_channels_per_block = down_channels_per_block
-        self._name = name
         self.num_levels = len(self._channels_per_block)
         self.num_latent_levels = len(self._latent_dims)
 
@@ -94,7 +92,7 @@ class _HierarchicalCore(nn.Module):
                 encoder_features = encoder(encoder_features)
                 if i % (self._blocks_per_level + 1) == self._blocks_per_level:
                     encoder_outputs.append(encoder_features)
-                
+
         decoder_features = encoder_outputs[-1]
         decoder_output_lo = decoder_features
 
@@ -121,7 +119,7 @@ class _HierarchicalCore(nn.Module):
 
                 # For compiling
                 # z = torch.normal(mu, log_sigma)
-                
+
                 used_latents.append(z)
 
                 decoder_output_lo = torch.concat([z, decoder_features], dim=1)
@@ -145,7 +143,6 @@ class _StitchingDecoder(nn.Module):
         activation_fn=nn.ReLU(),
         convs_per_block=3,
         blocks_per_level=3,
-        name="StitchingDecoder",
     ):
         super(_StitchingDecoder, self).__init__()
         self._latent_dims = latent_dims
@@ -203,7 +200,7 @@ class HierarchicalProbUNet(nn.Module):
         latent_dims=(1, 1, 1, 1),
         in_channels=3,
         channels_per_block=None,
-        num_classes=6,
+        num_classes=4,
         down_channels_per_block=None,
         activation_fn=nn.ReLU(),
         convs_per_block=3,
@@ -238,42 +235,30 @@ class HierarchicalProbUNet(nn.Module):
             activation_fn=activation_fn,
             convs_per_block=convs_per_block,
             blocks_per_level=blocks_per_level,
-            name="prior",
         )
 
         self.posterior = _HierarchicalCore(
             latent_dims=latent_dims,
-            in_channels=in_channels + num_classes + 1,
+            in_channels=in_channels + num_classes,
             channels_per_block=channels_per_block,
             down_channels_per_block=down_channels_per_block,
             activation_fn=activation_fn,
             convs_per_block=convs_per_block,
             blocks_per_level=blocks_per_level,
-            name="posterior",
         )
 
         self.f_comb = _StitchingDecoder(
             latent_dims=latent_dims,
             in_channels=channels_per_block[-len(latent_dims) - 1] + channels_per_block[-len(latent_dims) - 2],
             channels_per_block=channels_per_block,
-            num_classes=num_classes + 1,
+            num_classes=num_classes,
             down_channels_per_block=down_channels_per_block,
             activation_fn=activation_fn,
             convs_per_block=convs_per_block,
             blocks_per_level=blocks_per_level,
-            name="f_comb",
         )
 
         self._loss_kwargs = loss_kwargs
-
-        if self._loss_kwargs["type"] == "geco":
-            """
-            Refer to https://github.com/deepmind/sonnet/blob/v1/sonnet/python/modules/optimization_constraints.py
-            """
-            self._lagmul = nn.Parameter(torch.Tensor([self._loss_kwargs["beta"]]))
-            self._lagmul.register_hook(lambda grad: -grad * self._loss_kwargs["rate"])
-            self.softplus = nn.Softplus()
-
         self._alpha = nn.Parameter(torch.Tensor([self._loss_kwargs["alpha"]]), requires_grad=False)
         self.cutpoints = nn.Parameter(
             ((torch.arange(1, num_cuts, dtype=torch.float32, requires_grad=True)).expand((num_classes, num_cuts - 1))) / self._alpha
@@ -299,65 +284,33 @@ class HierarchicalProbUNet(nn.Module):
                     (logits, self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features).unsqueeze(0)),
                     dim=0,
                 )
-            # N x B x H x W x C
-            logits = logits.permute(0, 1, 3, 4, 2).float()
-            return torch.sigmoid(logits[:, :, :, :, 0:1]), logits[:, :, :, :, 1:]
+            
+            logits = logits.permute(0, 1, 3, 4, 2) # N x B x H x W x C
+            
+            return torch.cat(log_cumulative(self.cutpoints * self._alpha, logits), dim=-1).argmax(-1) # N x B x H x W x C
 
     def reconstruct(self, seg: torch.Tensor, img: torch.Tensor, mean: bool):
         _q_sample, _p_sample_z_q = self.forward(seg, img, mean)
         encoder_features, decoder_features, _, _ = _p_sample_z_q
         return _q_sample, _p_sample_z_q, self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features)
 
-    def rec_loss(
-        self, seg: torch.Tensor, img: torch.Tensor, lesion_area: torch.Tensor, skin_area: Optional[torch.Tensor] = None, mean: bool = False
-    ):
-        _q_sample, _p_sample_z_q, logits = self.reconstruct(torch.cat((lesion_area, seg), dim=1), img, mean=mean)
-
-        device = logits.get_device()
-        logits = logits.permute(0, 2, 3, 1)
-        seg = seg.permute(0, 2, 3, 1)
-
-        logits = torch.reshape(logits, (-1, self._num_classes + 1))
-        y_true = torch.reshape(seg, (-1, self._num_classes))
-        lesion_area = lesion_area.reshape(
-            -1,
-        ).float()
-
-        if skin_area is None:
-            skin_area = torch.ones(
-                y_true.shape[0],
-            ).to(device)
-        else:
-            skin_area = torch.reshape(skin_area, (-1,)).float()
-
-        # link_mat : N x C x (1, 1, num_cuts - 1)
-        # y_true : N x C
-        # nll : (N x C x 1)
+    def rec_loss(self, seg: torch.Tensor, img: torch.Tensor, mean: bool = False):
+        _q_sample, _p_sample_z_q, logits = self.reconstruct(seg, img, mean=mean)
 
         batch_size = seg.shape[0]
-        link_mat_0, link_mat_1, link_mat = log_cumulative(self.cutpoints * self._alpha, logits[:, 1:])
-        y_true = F.one_hot(y_true)
+
+        seg = F.one_hot(seg.permute(0, 2, 3, 1).reshape(-1, self._num_classes), num_classes=self._num_cuts + 1)  # N(B x W x H) x C x (num_cuts + 1)
+        logits = logits.permute(0, 2, 3, 1).reshape(-1, self._num_classes)  # N x C
+        link_mat_0, link_mat_1, link_mat = log_cumulative(self.cutpoints * self._alpha, logits)  # N x C x (1, 1, num_cuts - 1)
         nll = -torch.log(
-            link_mat_0 * y_true[:, :, [0]] + link_mat_1 * y_true[:, :, [1]] + (link_mat * y_true[:, :, 2:]).sum(-1, keepdim=True)
-        ).reshape(batch_size, -1, self._num_classes)
+            link_mat_0 * seg[:, :, [0]] + link_mat_1 * seg[:, :, [1]] + (link_mat * seg[:, :, 2:]).sum(-1, keepdim=True)
+        ).reshape(
+            batch_size, -1, self._num_classes
+        )  # B x (W x H) x C
 
-        xe = F.binary_cross_entropy_with_logits(logits[:, 0], lesion_area, reduction="none").reshape(batch_size, -1)
+        return _q_sample, _p_sample_z_q, {"mean": nll.mean(), "sum": torch.topk(nll, k=int(nll.shape[1] * self._loss_kwargs["topk"]), dim=1)[0].sum((1, 2)).mean()}
 
-        lesion_area = torch.reshape(lesion_area, shape=(batch_size, -1, 1))
-        skin_area = torch.reshape(skin_area, shape=(batch_size, -1))
-
-        return (
-            _q_sample,
-            _p_sample_z_q,
-            {
-                "mean": (lesion_area * nll).sum() / lesion_area.sum() + (skin_area * xe).sum() / skin_area.sum(),
-                "sum": ((lesion_area * nll).sum((1, 2)) + (skin_area * xe).sum(dim=1)).mean(0),
-                "mask": skin_area,
-            },
-        )
-
-
-    def kl_divergence(self, seg: torch.Tensor, img: torch.Tensor, q_dists: torch.Tensor, p_dists: torch.Tensor):
+    def kl_divergence(self, q_dists: torch.Tensor, p_dists: torch.Tensor):
         kl_dict = {}
         for level, (q, p) in enumerate(zip(q_dists, p_dists)):
             kl_per_pixel = kl.kl_divergence(p, q)
@@ -366,44 +319,23 @@ class HierarchicalProbUNet(nn.Module):
 
         return kl_dict
 
-    def sum_loss(
-        self,
-        seg: torch.Tensor,
-        img: torch.Tensor,
-        lesion_area: torch.Tensor,
-        skin_area: Optional[torch.Tensor] = None,
-        mean: bool = False,
-    ):
+    def sum_loss(self, seg: torch.Tensor, img: torch.Tensor, mean: bool = False):
         summaries = {}
 
         # rec loss
-        _q_sample, _p_sample_z_q, rec_loss = self.rec_loss(seg, img, lesion_area, skin_area, mean)
+        _q_sample, _p_sample_z_q, rec_loss = self.rec_loss(seg, img, mean)
         summaries["rec_loss_mean"] = rec_loss["mean"]
 
         # kl loss
-        kl_dict = self.kl_divergence(seg, img, _q_sample[2], _p_sample_z_q[2])
+        kl_dict = self.kl_divergence(_q_sample[2], _p_sample_z_q[2])
         kl_sum = torch.stack([kl for _, kl in kl_dict.items()], dim=-1).sum()
         summaries["kl_sum"] = kl_sum
         for level, kl in kl_dict.items():
             summaries["kl_{}".format(level)] = kl
         summaries["loss_mean"] = summaries["rec_loss_mean"] + summaries["kl_sum"]
 
-        mask_sum_per_instance = rec_loss["mask"].sum(dim=-1)
-        num_valid_pixels = mask_sum_per_instance.mean()
-
         # ELBO
-        if self._loss_kwargs["type"] == "elbo":
-            loss = rec_loss["sum"] + self._loss_kwargs["beta"] * kl_sum
-
-        # GECO
-        elif self._loss_kwargs["type"] == "geco":
-            reconstruction_threshold = self._loss_kwargs["kappa"] * num_valid_pixels
-            rec_constraint = rec_loss["sum"] - reconstruction_threshold
-            lagmul = self.softplus(self._lagmul) ** 2
-            loss = lagmul * rec_constraint + kl_sum
-            summaries["lagmul"] = self._lagmul
-        else:
-            raise NotImplementedError("Loss type {} not implemeted!".format(self._loss_kwargs["type"]))
+        loss = rec_loss["sum"] + self._loss_kwargs["beta"] * kl_sum
 
         summaries["loss"] = loss
         return dict(supervised_loss=loss, summaries=summaries)

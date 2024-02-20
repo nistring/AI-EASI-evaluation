@@ -21,7 +21,7 @@ def log_cumulative(cutpoints, logits: torch.Tensor):
         _type_: _description_
     """
     # logits : (N x C)
-    # cutpoints : (C x num_cuts)
+    # cutpoints : (C x num_cuts-1)
     logits = logits.unsqueeze(-1)
 
     # link_mat_0 : (N x C x 1)
@@ -44,8 +44,6 @@ class Res_block(nn.Module):
         n_down_channels=None,
         activation_fn=nn.ReLU(),
         convs_per_block=3,
-        initializers=None,
-        regularizers=None,
     ):
         #  input_features: A tensor of shape (b, c, h, w).
         super(Res_block, self).__init__()
