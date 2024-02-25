@@ -1,2 +1,2 @@
 python main.py --devices 4 --phase train \
-    # --checkpoint lightning_logs/version_3/checkpoints/epoch=50-step=714.ckpt
+    # --checkpoint lightning_logs/version_0/checkpoints/epoch=5-step=360.ckpt

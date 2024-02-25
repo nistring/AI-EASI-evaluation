@@ -1,13 +1,9 @@
-import cv2
-import pandas as pd
 import torch
 import numpy as np
 import sys
 import os
 import yaml
 from easydict import EasyDict as edict
-import pickle
-import torch.nn.functional as F
 
 
 def load_config(path):
@@ -16,68 +12,22 @@ def load_config(path):
         return config
 
 
-def draw_contours(img, prediction, certainty, weighted_mean: np.ndarray, scale=0.5, roi=None):
+def cal_EASI(area, severity):
+    """Calculates EASI from area(0-1) and severity
 
-    if roi is None:
-        roi = np.ones_like(prediction)
+    Args:
+        area (_type_): N
+        severity (_type_): N x C
 
-    # True & Certain
-    mask = prediction & certainty & roi
-    min_area = mask[roi].mean()
-    min_easi = weighted_mean[mask].sum() / mask.sum() * area_score(min_area)
-    mask = cv2.GaussianBlur(mask.astype(np.uint8), (int(scale * 8) * 2 + 1, int(scale * 8) * 2 + 1), 0) >= 0.5
-    contours, hierarchy = cv2.findContours(mask.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(img, contours, -1, color=(0, 0, 255), thickness=int(scale * 2))
-
-    # Only Certain
-    mask = prediction & roi
-    max_area = mask[roi].mean()
-    max_easi = weighted_mean[mask].sum() / mask.sum() * area_score(max_area)
-    mask = cv2.GaussianBlur(mask.astype(np.uint8), (int(scale * 8) * 2 + 1, int(scale * 8) * 2 + 1), 0) >= 0.5
-    contours, hierarchy = cv2.findContours(mask.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(img, contours, -1, color=(0, 255, 255), thickness=int(scale * 2))
-
-    return img, (min_area * 100, max_area * 100), (min_easi, max_easi)
-
-
-def normalize_uncertainty(uncertainty):
-    uncertainty -= uncertainty.min()
-    if uncertainty.max() != 0:
-        uncertainty /= uncertainty.max()
-    return uncertainty
-
-
-def eval_perform(df, labels, predictions, binary_unc_map, grades, cohens_k):
-    gt_2, gt_1, gt_0 = labels
-    gt_grade, pred_grade = grades
-
-    n_gt_2 = gt_2.sum().item()
-    n_gt_1 = gt_1.sum().item()
-    n_gt_0 = gt_0.sum().item()
-
-    results = pd.DataFrame(
-        {
-            "ac_2": [(gt_2 * (~binary_unc_map) * predictions).sum().item()],
-            "au_2": [(gt_2 * binary_unc_map * predictions).sum().item()],
-            "ic_2": [(gt_2 * (~binary_unc_map) * (~predictions)).sum().item()],
-            "iu_2": [(gt_2 * binary_unc_map * (~predictions)).sum().item()],
-            "c_1": [(gt_1 * (~binary_unc_map)).sum().item()],
-            "u_1": [(gt_1 * binary_unc_map).sum().item()],
-            "ac_0": [(gt_0 * (~binary_unc_map) * predictions).sum().item()],
-            "au_0": [(gt_0 * binary_unc_map * predictions).sum().item()],
-            "ic_0": [(gt_0 * (~binary_unc_map) * (~predictions)).sum().item()],
-            "iu_0": [(gt_0 * binary_unc_map * (~predictions)).sum().item()],
-            "n_gt_2": [n_gt_2],
-            "n_gt_1": [n_gt_1],
-            "n_gt_0": [n_gt_0],
-            "grade": [gt_grade],
-            "pred": [pred_grade],
-            "match": [int(gt_grade == pred_grade)],
-            "cohen's k": [cohens_k],
-        }
-    )
-
-    return pd.concat([df, results], axis=0)
+    Returns:
+        _type_: Mean and std of area and severity score plus EASI
+    """
+    area = area2score(area)
+    if area.shape[0] == severity.shape[0]:
+        EASI = area * severity.sum(1)  # N
+    else:
+        EASI = area[np.newaxis, :] * severity.sum(1, keepdims=True)  # N x N'
+    return area.mean(), area.std(), severity.mean(0), severity.std(0), EASI.mean(), EASI.std()
 
 
 def area2score(area):
@@ -113,17 +63,10 @@ def heatmap(ori, pred):
     Returns:
         np.ndarray: C x H x W x 3
     """
-    if isinstance(ori, np.ndarray):
-        ori = torch.HalfTensor(ori).to(pred.device)
-    
-    return (
-        torch.clamp(
-            (pred[..., 1:].unsqueeze(-1) * torch.HalfTensor([[255, 64, 64], [64, 255, 64], [64, 64, 255]]).to(pred.device)).sum(-2)
-            + ori.unsqueeze(0) * pred[..., [0]],
-            0.0,
-            255,
-        )
-        .to(torch.uint8)
-        .cpu()
-        .numpy()
-    )
+
+    return np.clip(
+        (pred[:, :, :, 1:, np.newaxis] * np.array([[255, 64, 64], [64, 255, 64], [64, 64, 255]])).sum(-2)
+        + ori[np.newaxis, :, :, :] * pred[..., [0]],
+        0.0,
+        255,
+    ).astype(np.uint8)

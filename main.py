@@ -9,14 +9,16 @@ from argparse import ArgumentParser
 import os
 import cv2
 import numpy as np
-from statsmodels.stats.inter_rater import fleiss_kappa
 from datetime import datetime
 import shutil
+import pickle
+from statsmodels.stats.inter_rater import fleiss_kappa, aggregate_raters
 
 from loader import get_dataset
 from model.model import HierarchicalProbUNet
 from model.model_utils import log_cumulative
 from utils import *
+from patchify import patchify
 
 
 class AtopyDataModule(pl.LightningDataModule):
@@ -44,7 +46,7 @@ class AtopyDataModule(pl.LightningDataModule):
         return DataLoader(self.val, batch_size=self.cfg.train.batch_size, num_workers=self.cfg.num_workers, pin_memory=True)
 
     def test_dataloader(self):
-        return DataLoader(self.test, batch_size=self.cfg.test.batch_size, num_workers=self.cfg.num_workers, pin_memory=True)
+        return DataLoader(self.test, batch_size=self.cfg.test.batch_size, num_workers=self.cfg.num_workers, pin_memory=False)
 
     # def predict_dataloader(self):
     #     return DataLoader(self.predict, batch_size=1, num_workers=self.cfg.num_workers, pin_memory=True)
@@ -57,13 +59,19 @@ class LitModel(pl.LightningModule):
         self.cfg = cfg
         self.mc_n = cfg.test.mc_n
         self.exp_name = exp_name
-        self.automatic_optimization = False
         self.cfg.exp_date = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
+        self.step = self.cfg.test.step
+
+        # Window for smooth blending
+        window = torch.ones(256)
+        window[: 256 - self.step] = torch.arange(256 - self.step) / self.step
+        window = torch.tile(window[:, None], (1, 256))
+        self.window = (window * torch.rot90(window) * torch.rot90(window, 2) * torch.rot90(window, 3))[..., None]  # 256 x 256 x 1
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.cfg.train.lr, weight_decay=self.cfg.train.weight_decay)
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.cfg.train.gamma)
-        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=self.cfg.train.gamma)
+        # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.cfg.train.gamma)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=self.cfg.train.gamma)
         return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
     def on_train_start(self):
@@ -71,37 +79,22 @@ class LitModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         seg = batch["seg"]  # B x labeller x H x W
+        seg = seg[:, [self.current_epoch % seg.shape[1]]]
         img = batch["img"]  # B x C x H x W
         grade = batch["grade"]  # B x C x cls_labellers
-        opt = self.optimizers()
+        grade = grade[:, :, [self.current_epoch % grade.shape[2]], None]
 
-        summaries = None
-        for i in range(seg.shape[1]):
-            for j in range(grade.shape[-1]):
-                # B1HW, BC11 -> BCHW
-                loss_dict = self.model.sum_loss(seg[:, [i]] * grade[:, :, [j], None], img)
-
-                # Backward
-                opt.zero_grad()
-                self.manual_backward(loss_dict["supervised_loss"])
-                self.clip_gradients(opt, gradient_clip_val=0.5, gradient_clip_algorithm="norm")
-                opt.step()
-
-                if summaries is None:
-                    summaries = loss_dict["summaries"]
-                else:
-                    for k, v in loss_dict["summaries"].items():
-                        summaries[k] += v
-        for k, v in summaries.items():
-            summaries[k] = v / seg.shape[1] / grade.shape[-1]
+        loss_dict = self.model.sum_loss(seg, grade, img)
 
         self.log_dict(
-            {"train_" + k: v for k, v in summaries.items()}, sync_dist=True, on_epoch=True, on_step=False, batch_size=seg.shape[0]
+            {"train_" + k: v for k, v in loss_dict["summaries"].items()},
+            sync_dist=True,
+            on_epoch=True,
+            on_step=False,
+            batch_size=seg.shape[0],
         )
 
-    def on_train_epoch_end(self):
-        sch = self.lr_schedulers()
-        sch.step()
+        return loss_dict["supervised_loss"]
 
     def validation_step(self, batch, batch_idx):
         seg = batch["seg"]  # B x labeller x H x W
@@ -111,7 +104,7 @@ class LitModel(pl.LightningModule):
         for i in range(seg.shape[1]):
             for j in range(grade.shape[-1]):
                 # B1HW, BC11 -> BCHW
-                loss_dict = self.model.sum_loss(seg[:, [i]] * grade[:, :, [j], None], img)
+                loss_dict = self.model.sum_loss(seg[:, [i]], grade[:, :, [j], None], img)
                 if summaries is None:
                     summaries = loss_dict["summaries"]
                 else:
@@ -124,76 +117,171 @@ class LitModel(pl.LightningModule):
 
     def on_test_start(self):
         self.logger.log_hyperparams(dict(self.cfg.test))
-        self.EIExL = []
-        self.EIExL_std = []
-        self.gt_EIExL = []
-        self.gt_EIExL_std = []
+        self.gt_area = []
+        self.gt_severity = []
+        self.gt_kappa = []
+        self.gt_easi = []
+        self.area = []
+        self.severity = []
+        self.kappa = []
+        self.easi = []
 
     def test_step(self, batch, batch_idx):
-        seg = batch["seg"]  # B x labeller x H x W
-        img = batch["img"]  # B x 3 x H x W
-        grade = batch["grade"]  # B x C x cls_labellers
-        ori_img = batch["ori_img"]
+        # Load batch
+        seg = batch["seg"]  # B x L x H x W
+        grade = batch["grade"]  # B x C x L'
+        ori_img = batch["ori_img"].cpu().numpy()
         file_name = batch["file_name"]
 
-        H, W = img.shape[2:]
-        B, C = grade.shape[:2]
-        num_classes = self.cfg.model.num_classes
+        # Ground Truth
+        gt_area = seg.reshape(seg.shape[:2] + (-1,)).permute(1, 0, 2).cpu().numpy()  # N x B x (H x W)
+        gt_kappa = np.nan_to_num(np.array([fleiss_kappa(aggregate_raters(gt_area[:, i].T)[0]) for i in range(gt_area.shape[1])]), nan=1.) # Complete agreement : k = 1
+        gt_area = gt_area.astype(np.float32).mean(-1, keepdims=True)  # N x B x 1
+        gt_severity = grade.permute(2, 0, 1).cpu().numpy()  # N x B x C
+        gt_easi = (area2score(gt_area)[np.newaxis, ...] * gt_severity[:, np.newaxis, :, :]).reshape((-1,) + gt_severity.shape[1:])  # N x B x C
+        gt_area = gt_area.squeeze(-1)  # N x B
 
-        preds = self.model.sample(img, self.mc_n)  # N x B x H x W x C
-        gt = seg.reshape((B, 1, 1, -1, H, W)) * grade.reshape((B, C, -1, 1, 1, 1))  # B x C x _ x _ H x W
-        gt_EIExL_std = gt.float().std((2, 3)).mean((2, 3))  # B x C
-        gt = F.one_hot(gt, num_classes=num_classes).float().mean((2, 3))  # B x C x H x W x 4
-        area = preds.bool().float().mean((2, 3))
-        EIExL = preds.float().mean((2, 3)) * area2score(area) / area  # N x B x C
-        EIExL_std = preds.float().std(0).mean((1, 2))  # B x C
-        gt_EIExL = (
-            (grade.unsqueeze(-1) * area2score(seg.float().mean((2, 3))).reshape((B, 1, 1, -1))).reshape((B, C, -1)).permute(2, 0, 1)
-        )  # N x B x C
+        if "img" in batch.keys():
+            preds = self.model.sample(batch["img"], self.mc_n).argmax(-1)  # N x B x C x H x W
 
-        self.EIExL.append(np.nan_to_num(EIExL.cpu().numpy()))
-        self.EIExL_std.append(EIExL_std.cpu().numpy())
-        self.gt_EIExL.append(gt_EIExL.cpu().numpy())
-        self.gt_EIExL_std.append(gt_EIExL_std.cpu().numpy())
+            # Prediction; area and severity scores
+            area = preds.sum(2).bool().reshape(preds.shape[:2] + (-1,)).cpu().numpy()  # N x B x (H x W)
+            kappa = np.nan_to_num(np.array([fleiss_kappa(aggregate_raters(area[:, i].T)[0]) for i in range(area.shape[1])]), nan=1.)
+            area = area.astype(np.float32).mean(-1, keepdims=True)  # N x B x 1
+            severity = preds.float().mean((3, 4)).cpu().numpy() / area  # N x B x C
+            easi = area2score(area) * severity  # N x B x C
+            area = area.squeeze(-1)  # N x B
+
+        elif "patches" in batch.keys():
+            assert self.cfg.test.batch_size == 1
+
+            # Load Batch
+            patches = batch["patches"][0]  # Ny x Nx x C x h x w x 3
+            mask = batch["mask"][0]  # 1 x H x W
+            pad = batch["pad_width"][0]
+
+            # Inference with patch batch
+            nx = patches.shape[1]
+            preds = torch.zeros(
+                (
+                    self.mc_n,
+                    self.cfg.model.num_classes,
+                    (patches.shape[0] - 1) * self.step + 256,
+                    (patches.shape[1] - 1) * self.step + 256,
+                    self.cfg.model.num_cuts + 1,
+                ),
+                dtype=torch.float,
+            ).to(
+                patches.device
+            )  # N x C x H x W x num_cuts+1
+
+            window = self.window.to(patches.device)
+            patches = patches.reshape((-1,) + patches.shape[2:])  # N x C x h x w x 3
+
+            valid_patches = self.valid_patches(mask[0], pad[:2])
+            N = len(valid_patches)
+            bs = min(self.cfg.test.max_num_patches, N)
+            for i in range(0, N, bs):
+                end = min(i + bs, N)
+                pred = self.model.sample(patches[valid_patches[i:end]], self.mc_n)  # N x bs x C x h x w x num_cuts+1
+
+                for j in range(end - i):
+                    y = valid_patches[i + j] // nx * self.step
+                    x = valid_patches[i + j] % nx * self.step
+                    preds[:, :, y : y + 256, x : x + 256] += pred[:, j] * window
+
+            preds = preds.argmax(-1)  # N x C x H x W
+            # Unpad
+            preds = preds[:, :, pad[0, 0] : -pad[0, 1], pad[1, 0] : -pad[1, 1]] * mask
+
+            # Prediction; area and severity scores
+            area = preds.sum(1, keepdims=True).bool().reshape((preds.shape[0], -1))[:, mask.flatten()].cpu().numpy()  # N x (H x W)'
+            kappa = np.array([1.]) # np.nan_to_num(np.array([fleiss_kappa(aggregate_raters(area.T)[0])]), nan=1.)
+            area = area.astype(np.float32).mean(-1, keepdims=True)  # N x 1
+            severity = preds.float().mean((2, 3)).cpu().numpy() / area  # N x C
+            easi = (area2score(area) * severity)[:, np.newaxis, :]  # N x 1 x C
+            severity = severity[:, np.newaxis, :]  # N x 1 X C
+            preds = preds.unsqueeze(1)
+        else:
+            raise ValueError
+
+        # Gather results
+        self.gt_area.append(gt_area)
+        self.gt_severity.append(gt_severity)
+        self.gt_kappa.append(gt_kappa)
+        self.gt_easi.append(gt_easi)
+        self.area.append(area)
+        self.severity.append(np.nan_to_num(severity))
+        self.kappa.append(kappa)
+        self.easi.append(easi)
 
         # visualization
-        ori_img = ori_img.cpu().numpy()
-        preds = (F.one_hot(preds, num_classes=self.cfg.model.num_classes).float().mean(0)).permute(0, 3, 1, 2, 4)  # B x C x H x W x 4
+        B, C, H, W = preds.shape[1:]
+        num_classes = self.cfg.model.num_cuts + 1
+        preds = F.one_hot(preds, num_classes=num_classes).float().mean(0).cpu().numpy()  # B x C x H x W x 4
+        gt = (
+            F.one_hot(seg.reshape((B, 1, 1, -1, H, W)) * grade.reshape((B, C, -1, 1, 1, 1)), num_classes=num_classes)
+            .float()
+            .mean((2, 3))
+            .cpu()
+            .numpy()
+        )  # B x C x H x W x 4
+
+        font_size = max(H // 256, 1)
         for i in range(B):
-            resized_ori = cv2.resize(ori_img[i], (256, 256))
-            pred_img = np.concatenate(
-                (resized_ori, np.swapaxes(np.swapaxes(heatmap(resized_ori, preds[i]), 1, 2).reshape(-1, 256, 3), 0, 1)), axis=1
-            )
-            gt_img = np.concatenate(
-                (
-                    np.ones_like(resized_ori) * 255,
-                    np.swapaxes(np.swapaxes(heatmap(resized_ori, gt[i]), 1, 2).reshape(-1, 256, 3), 0, 1),
-                ),
-                axis=1,
-            )
+            resized_ori = cv2.resize(ori_img[i], (W, H))
+
+            # Pred summary
+            pred_img = self.vis_pred(resized_ori, preds[i])
+            text = self.write_summary(area[:, i], severity[:, i])
+            for j, t in enumerate(text):
+                cv2.putText(
+                    pred_img,
+                    t,
+                    (10, 25 * (j + 1) * font_size),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_size / 2,
+                    (255, 90, 0),
+                    font_size,
+                    cv2.LINE_AA,
+                )
+
+            # GT summary
+            gt_img = self.vis_gt(resized_ori, gt[i])
+            text = self.write_summary(gt_area[:, i], gt_severity[:, i])
+            for j, t in enumerate(text):
+                cv2.putText(
+                    gt_img,
+                    t,
+                    (10, 25 * (j + 1) * font_size),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_size / 2,
+                    (255, 90, 0),
+                    font_size,
+                    cv2.LINE_AA,
+                )
+
+            # Concatenate prediction and GT and save it.
             cv2.imwrite(f"results/{self.exp_name}/{file_name[i]}", np.concatenate((pred_img, gt_img), axis=0))
 
     def on_test_end(self):
         with open(f"results/{self.exp_name}/results.pkl", "wb") as f:
             pickle.dump(
                 {
-                    "EIExL": np.concatenate(self.EIExL, axis=1),  # N x B x C
-                    "EIExL_std": np.concatenate(self.EIExL_std, axis=0),  # B x C
-                    "gt_EIExL": np.concatenate(self.gt_EIExL, axis=1),  # N x B x C
-                    "gt_EIExL_std": np.concatenate(self.gt_EIExL_std, axis=0),  # B x C
+                    "gt_area": np.concatenate(self.gt_area, axis=1),  # N x B
+                    "gt_severity": np.concatenate(self.gt_severity, axis=1),  # N x B x C
+                    "gt_kappa": np.concatenate(self.gt_kappa),  # B
+                    "gt_easi": np.concatenate(self.gt_easi, axis=1),  # N x B x C
+                    "area": np.concatenate(self.area, axis=1),  # N x B
+                    "severity": np.concatenate(self.severity, axis=1),  # N x B x C
+                    "kappa": np.concatenate(self.kappa),  # B
+                    "easi": np.concatenate(self.easi, axis=1),  # N x B x C
                 },
                 f,
             )
 
     def on_predict_start(self):
         self.logger.log_hyperparams(dict(self.cfg.predict))
-        self.step = self.cfg.predict.step
-
-        # Window for smooth blending
-        window = np.ones(256)
-        window[: 256 - self.step] = np.arange(256 - self.step) / self.step
-        window = np.tile(window[:, np.newaxis], (1, 256))
-        self.window = window * np.rot90(window) * np.rot90(window, 2) * np.rot90(window, 3)
 
     def predict_step(self, batch, batch_idx):
         patches = batch["patches"][0]
@@ -258,6 +346,47 @@ class LitModel(pl.LightningModule):
 
         return img
 
+    def valid_patches(self, mask: torch.Tensor, pad: torch.Tensor):
+        """_summary_
+
+        Args:
+            mask (torch.Tensor): H x W
+
+        Returns:
+            _type_: _description_
+        """
+        mask_patches = patchify(np.pad(mask.cpu().numpy(), pad.cpu().numpy()), (256, 256), self.step).reshape((-1, 256, 256))
+        valid = []
+        for i in range(mask_patches.shape[0]):
+            if np.any(mask_patches[i] != 0):
+                valid.append(i)
+        return valid
+
+    def vis_gt(self, img, gt):
+        return np.concatenate(
+            (
+                np.ones_like(img) * 255,
+                np.swapaxes(np.swapaxes(heatmap(img, gt), 1, 2).reshape(-1, img.shape[0], 3), 0, 1),
+            ),
+            axis=1,
+        )
+
+    def vis_pred(self, img, pred):
+        return np.concatenate((img, np.swapaxes(np.swapaxes(heatmap(img, pred), 1, 2).reshape(-1, img.shape[0], 3), 0, 1)), axis=1)
+
+    def write_summary(self, area, severity):
+        area_mean, area_std, severity_mean, severity_std, EASI_mean, EASI_std = cal_EASI(area, severity)
+        severity_lower_bound = np.clip(severity_mean - severity_std, 0, 3)
+        severity_upper_bound = np.clip(severity_mean + severity_std, 0, 3)
+        return [
+            f"Area score : {max(area_mean-area_std, 0):.2f} - {min(area_mean+area_std, 6):.2f}",
+            f"Erythema : {severity_lower_bound[0]:.2f} - {severity_upper_bound[0]:.2f}",
+            f"Induration : {severity_lower_bound[1]:.2f} - {severity_upper_bound[1]:.2f}",
+            f"Excoriation : {severity_lower_bound[2]:.2f} - {severity_upper_bound[2]:.2f}",
+            f"Lichenification : {severity_lower_bound[3]:.2f} - {severity_upper_bound[3]:.2f}",
+            f"EASI : {max(EASI_mean-EASI_std, 0):.2f} - {min(EASI_mean+EASI_std, 72):.2f}",
+        ]
+
 
 if __name__ == "__main__":
     # env
@@ -285,12 +414,13 @@ if __name__ == "__main__":
         num_classes=cfg.model.num_classes,
         loss_kwargs=dict(cfg.train.loss_kwargs),
         num_cuts=cfg.model.num_cuts,
+        weights=torch.Tensor(cfg.model.weights),
     )
 
     # train
     if args.phase == "train":
         litmodel = LitModel(model, cfg=cfg)
-        checkpoint_callback = ModelCheckpoint(monitor="val_loss_mean")
+        checkpoint_callback = ModelCheckpoint(monitor="val_loss")
         lr_monitor = LearningRateMonitor(logging_interval="step")
         trainer = pl.Trainer(
             max_epochs=cfg.train.max_epochs,
@@ -298,7 +428,9 @@ if __name__ == "__main__":
             accelerator="gpu",
             strategy="ddp_find_unused_parameters_true",
             callbacks=[checkpoint_callback, lr_monitor],
+            check_val_every_n_epoch=10,
             log_every_n_steps=1,
+            gradient_clip_val=0.5,
         )
         if args.checkpoint:
             trainer.fit(litmodel, datamodule=atopy, ckpt_path=args.checkpoint)

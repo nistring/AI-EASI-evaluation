@@ -207,6 +207,7 @@ class HierarchicalProbUNet(nn.Module):
         blocks_per_level=3,
         loss_kwargs=None,
         num_cuts=3,
+        weights=None,
     ):
         super(HierarchicalProbUNet, self).__init__()
 
@@ -261,10 +262,20 @@ class HierarchicalProbUNet(nn.Module):
         self._loss_kwargs = loss_kwargs
         self._alpha = nn.Parameter(torch.Tensor([self._loss_kwargs["alpha"]]), requires_grad=False)
         self.cutpoints = nn.Parameter(
-            ((torch.arange(1, num_cuts, dtype=torch.float32, requires_grad=True)).expand((num_classes, num_cuts - 1))) / self._alpha
+            torch.arange(1, num_cuts, dtype=torch.float32, requires_grad=True).expand((num_classes, 1, num_cuts - 1)).clone() / self._alpha
         )
-        self._num_classes = num_classes
         self._num_cuts = num_cuts
+
+        # Weights for class imbalance
+        if weights is None:
+            weights = torch.ones((num_classes, num_cuts + 1))
+        self._weights = weights
+
+    def _apply(self, fn):
+        super(HierarchicalProbUNet, self)._apply(fn)
+        # Apply to(device) to member tensor(weights)
+        self._weights = fn(self._weights)
+        return self
 
     def forward(self, seg: torch.Tensor, img: torch.Tensor, mean: bool):
         _q_sample = self.posterior(inputs=torch.concat([seg, img], dim=1), mean=mean, z_q=[])
@@ -284,31 +295,44 @@ class HierarchicalProbUNet(nn.Module):
                     (logits, self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features).unsqueeze(0)),
                     dim=0,
                 )
-            
-            logits = logits.permute(0, 1, 3, 4, 2) # N x B x H x W x C
-            
-            return torch.cat(log_cumulative(self.cutpoints * self._alpha, logits), dim=-1).argmax(-1) # N x B x H x W x C
+
+            logit_shape = logits.shape
+            logits = logits.reshape((-1,) + logit_shape[2:])  # (N x B) x C x H x W
+
+            return log_cumulative(self.cutpoints * self._alpha, logits).reshape(logit_shape + (-1,))  # N x B x C x H x W x (num_cuts + 1)
 
     def reconstruct(self, seg: torch.Tensor, img: torch.Tensor, mean: bool):
         _q_sample, _p_sample_z_q = self.forward(seg, img, mean)
         encoder_features, decoder_features, _, _ = _p_sample_z_q
+
         return _q_sample, _p_sample_z_q, self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features)
 
-    def rec_loss(self, seg: torch.Tensor, img: torch.Tensor, mean: bool = False):
+    def dice_loss(self, pred: torch.Tensor, seg: torch.Tensor):
+        loss = dice_score(pred, seg) * self._weights  # B x C x num_cuts+1
+        mask = loss != 0
+        return (1 - (loss * mask).sum(2) / mask.sum(2)).sum(1).mean() # B
+
+    def ce_loss(self, pred: torch.Tensor, seg: torch.Tensor):
+        loss = 0.
+        pred = torch.log(pred.permute((0, 1, 4, 2, 3)).contiguous().clamp_min(1.0e-7)) # B x C x num_cuts+1 x H x W
+        for i in range(pred.shape[1]):
+            loss += F.nll_loss(pred[:, i], seg[:, i], self._weights[i]).mean()
+
+        return loss
+
+    def rec_loss(self, seg: torch.Tensor, grade: torch.Tensor, img: torch.Tensor, mean: bool = False):
+        seg = seg * grade  # B x C x H x W
         _q_sample, _p_sample_z_q, logits = self.reconstruct(seg, img, mean=mean)
 
-        batch_size = seg.shape[0]
+        # seg[..., 0] = 1.
+        # grade = grade == 0 # B x C x 1 x 1
+        # seg[..., 0] = seg[..., 0] * grade
+        pred = log_cumulative(self.cutpoints * self._alpha, logits)  # B x C x H x W x num_cuts+1
+        
+        # loss = self.ce_loss(pred, seg)
+        loss = self.dice_loss(pred, F.one_hot(seg, num_classes=self._num_cuts + 1))
 
-        seg = F.one_hot(seg.permute(0, 2, 3, 1).reshape(-1, self._num_classes), num_classes=self._num_cuts + 1)  # N(B x W x H) x C x (num_cuts + 1)
-        logits = logits.permute(0, 2, 3, 1).reshape(-1, self._num_classes)  # N x C
-        link_mat_0, link_mat_1, link_mat = log_cumulative(self.cutpoints * self._alpha, logits)  # N x C x (1, 1, num_cuts - 1)
-        nll = -torch.log(
-            link_mat_0 * seg[:, :, [0]] + link_mat_1 * seg[:, :, [1]] + (link_mat * seg[:, :, 2:]).sum(-1, keepdim=True)
-        ).reshape(
-            batch_size, -1, self._num_classes
-        )  # B x (W x H) x C
-
-        return _q_sample, _p_sample_z_q, {"mean": nll.mean(), "sum": torch.topk(nll, k=int(nll.shape[1] * self._loss_kwargs["topk"]), dim=1)[0].sum((1, 2)).mean()}
+        return _q_sample, _p_sample_z_q, loss
 
     def kl_divergence(self, q_dists: torch.Tensor, p_dists: torch.Tensor):
         kl_dict = {}
@@ -319,12 +343,12 @@ class HierarchicalProbUNet(nn.Module):
 
         return kl_dict
 
-    def sum_loss(self, seg: torch.Tensor, img: torch.Tensor, mean: bool = False):
+    def sum_loss(self, seg: torch.Tensor, grade: torch.Tensor, img: torch.Tensor, mean: bool = False):
         summaries = {}
 
         # rec loss
-        _q_sample, _p_sample_z_q, rec_loss = self.rec_loss(seg, img, mean)
-        summaries["rec_loss_mean"] = rec_loss["mean"]
+        _q_sample, _p_sample_z_q, rec_loss = self.rec_loss(seg, grade, img, mean)
+        summaries["rec_loss"] = rec_loss
 
         # kl loss
         kl_dict = self.kl_divergence(_q_sample[2], _p_sample_z_q[2])
@@ -332,10 +356,9 @@ class HierarchicalProbUNet(nn.Module):
         summaries["kl_sum"] = kl_sum
         for level, kl in kl_dict.items():
             summaries["kl_{}".format(level)] = kl
-        summaries["loss_mean"] = summaries["rec_loss_mean"] + summaries["kl_sum"]
 
         # ELBO
-        loss = rec_loss["sum"] + self._loss_kwargs["beta"] * kl_sum
+        loss = rec_loss + self._loss_kwargs["beta"] * kl_sum
 
         summaries["loss"] = loss
         return dict(supervised_loss=loss, summaries=summaries)

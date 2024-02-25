@@ -10,30 +10,45 @@ def init_weights_orthogonal_normal(m):
         nn.init.trunc_normal_(m.bias, mean=0, std=0.001)
 
 
-def log_cumulative(cutpoints, logits: torch.Tensor):
+def dice_score(output: torch.Tensor, target: torch.Tensor, smooth: float = 0.0, eps: float = 1e-7) -> torch.Tensor:
+    """_summary_
+
+    Args:
+        output (torch.Tensor):
+        target (torch.Tensor):
+        smooth (float, optional): Defaults to 0.0.
+        eps (float, optional): Defaults to 1e-7.
+
+    Returns:
+        torch.Tensor: dice score
+    """
+    assert output.shape == target.shape
+    dsize = output.shape[:2] + (-1, output.shape[-1])
+    output = output.reshape(dsize)  # N x C x _ x num_cuts+1
+    target = target.reshape(dsize)  # N x C x _ x num_cuts+1
+
+    return (2.0 * (output * target).sum(2) + smooth) / ((output + target).sum(2) + smooth).clamp_min(eps)  # N x C x num_cuts+1
+
+
+def log_cumulative(cutpoints: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
     """Convert logits to probability
     https://github.com/EthanRosenthal/spacecutter/blob/master/spacecutter/models.py
 
     Args:
-        logits (_type_): _description_
+        cutpoints (torch.Tensor): C x 1 x num_cuts-1
+        logits (torch.Tensor): N x C x ...
 
     Returns:
-        _type_: _description_
+        torch.Tensor: _description_
     """
-    # logits : (N x C)
-    # cutpoints : (C x num_cuts-1)
-    logits = logits.unsqueeze(-1)
+    logit_shape = logits.shape
+    logits = logits.reshape((logit_shape[0], logit_shape[1], -1, 1))  # N x C x _ x 1
+    p_0 = torch.sigmoid(-logits)  # N x C x _ x 1
+    sigmoids = torch.sigmoid(cutpoints - logits)  # N x C x _ x num_cuts-1
 
-    # link_mat_0 : (N x C x 1)
-    link_mat_0 = torch.sigmoid(-logits)
-
-    # sigmoids : (N x C x num_cuts-1)
-    sigmoids = torch.sigmoid(cutpoints - logits)
-
-    link_mat_1 = sigmoids[..., 0:1] - link_mat_0
-    link_mat = torch.cat((sigmoids[..., 1:] - sigmoids[..., :-1], 1 - sigmoids[..., -1:]), dim=-1)
-
-    return link_mat_0, link_mat_1, link_mat
+    return torch.cat((p_0, sigmoids[..., 0:1] - p_0, sigmoids[..., 1:] - sigmoids[..., :-1], 1 - sigmoids[..., -1:]), dim=-1).reshape(
+        logit_shape + (-1,)
+    )  # N x C x ... x num_cuts + 1
 
 
 class Res_block(nn.Module):
