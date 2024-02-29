@@ -297,9 +297,9 @@ class HierarchicalProbUNet(nn.Module):
                 )
 
             logit_shape = logits.shape
-            logits = logits.reshape((-1,) + logit_shape[2:])  # (N x B) x C x H x W
+            logits = logits.reshape((-1,) + logit_shape[2:])  # (NB)CHW
 
-            return log_cumulative(self.cutpoints * self._alpha, logits).reshape(logit_shape + (-1,))  # N x B x C x H x W x (num_cuts + 1)
+            return log_cumulative(self.cutpoints * self._alpha, logits).reshape(logit_shape + (-1,))  # NBCHWc
 
     def reconstruct(self, seg: torch.Tensor, img: torch.Tensor, mean: bool):
         _q_sample, _p_sample_z_q = self.forward(seg, img, mean)
@@ -308,26 +308,26 @@ class HierarchicalProbUNet(nn.Module):
         return _q_sample, _p_sample_z_q, self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features)
 
     def dice_loss(self, pred: torch.Tensor, seg: torch.Tensor):
-        loss = dice_score(pred, seg) * self._weights  # B x C x num_cuts+1
+        loss = dice_score(pred, seg) * self._weights  # BCc
         mask = loss != 0
         return (1 - (loss * mask).sum(2) / mask.sum(2)).sum(1).mean() # B
 
     def ce_loss(self, pred: torch.Tensor, seg: torch.Tensor):
         loss = 0.
-        pred = torch.log(pred.permute((0, 1, 4, 2, 3)).contiguous().clamp_min(1.0e-7)) # B x C x num_cuts+1 x H x W
+        pred = torch.log(pred.permute((0, 1, 4, 2, 3)).contiguous().clamp_min(1.0e-7)) # BCcHW
         for i in range(pred.shape[1]):
             loss += F.nll_loss(pred[:, i], seg[:, i], self._weights[i]).mean()
 
         return loss
 
     def rec_loss(self, seg: torch.Tensor, grade: torch.Tensor, img: torch.Tensor, mean: bool = False):
-        seg = seg * grade  # B x C x H x W
+        seg = seg * grade  # BCHW
         _q_sample, _p_sample_z_q, logits = self.reconstruct(seg, img, mean=mean)
 
         # seg[..., 0] = 1.
-        # grade = grade == 0 # B x C x 1 x 1
+        # grade = grade == 0 # BC11
         # seg[..., 0] = seg[..., 0] * grade
-        pred = log_cumulative(self.cutpoints * self._alpha, logits)  # B x C x H x W x num_cuts+1
+        pred = log_cumulative(self.cutpoints * self._alpha, logits)  # BCHWc
         
         # loss = self.ce_loss(pred, seg)
         loss = self.dice_loss(pred, F.one_hot(seg, num_classes=self._num_cuts + 1))

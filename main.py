@@ -78,10 +78,10 @@ class LitModel(pl.LightningModule):
         self.logger.log_hyperparams(dict(self.cfg.train))
 
     def training_step(self, batch, batch_idx):
-        seg = batch["seg"]  # B x labeller x H x W
+        seg = batch["seg"]  # BlHW (l : labeller)
         seg = seg[:, [self.current_epoch % seg.shape[1]]]
-        img = batch["img"]  # B x C x H x W
-        grade = batch["grade"]  # B x C x cls_labellers
+        img = batch["img"]  # BCHW
+        grade = batch["grade"]  # BCl
         grade = grade[:, :, [self.current_epoch % grade.shape[2]], None]
 
         loss_dict = self.model.sum_loss(seg, grade, img)
@@ -135,11 +135,10 @@ class LitModel(pl.LightningModule):
 
         # Ground Truth
         gt_area = seg.reshape(seg.shape[:2] + (-1,)).permute(1, 0, 2).cpu().numpy()  # N x B x (H x W)
-        gt_kappa = np.nan_to_num(np.array([fleiss_kappa(aggregate_raters(gt_area[:, i].T)[0]) for i in range(gt_area.shape[1])]), nan=1.) # Complete agreement : k = 1
+        # gt_kappa = np.nan_to_num(np.array([fleiss_kappa(aggregate_raters(gt_area[:, i].T)[0]) for i in range(gt_area.shape[1])]), nan=1.) # Complete agreement : k = 1
+        gt_kappa = np.array([1.])
         gt_area = gt_area.astype(np.float32).mean(-1, keepdims=True)  # N x B x 1
         gt_severity = grade.permute(2, 0, 1).cpu().numpy()  # N x B x C
-        gt_easi = (area2score(gt_area)[np.newaxis, ...] * gt_severity[:, np.newaxis, :, :]).reshape((-1,) + gt_severity.shape[1:])  # N x B x C
-        gt_area = gt_area.squeeze(-1)  # N x B
 
         if "img" in batch.keys():
             preds = self.model.sample(batch["img"], self.mc_n).argmax(-1)  # N x B x C x H x W
@@ -173,17 +172,17 @@ class LitModel(pl.LightningModule):
                 dtype=torch.float,
             ).to(
                 patches.device
-            )  # N x C x H x W x num_cuts+1
+            )  # NCHW x num_cuts+1
 
             window = self.window.to(patches.device)
-            patches = patches.reshape((-1,) + patches.shape[2:])  # N x C x h x w x 3
+            patches = patches.reshape((-1,) + patches.shape[2:])  # NChw3
 
             valid_patches = self.valid_patches(mask[0], pad[:2])
             N = len(valid_patches)
             bs = min(self.cfg.test.max_num_patches, N)
             for i in range(0, N, bs):
                 end = min(i + bs, N)
-                pred = self.model.sample(patches[valid_patches[i:end]], self.mc_n)  # N x bs x C x h x w x num_cuts+1
+                pred = self.model.sample(patches[valid_patches[i:end]], self.mc_n)  # NbChwc
 
                 for j in range(end - i):
                     y = valid_patches[i + j] // nx * self.step
@@ -195,15 +194,19 @@ class LitModel(pl.LightningModule):
             preds = preds[:, :, pad[0, 0] : -pad[0, 1], pad[1, 0] : -pad[1, 1]] * mask
 
             # Prediction; area and severity scores
-            area = preds.sum(1, keepdims=True).bool().reshape((preds.shape[0], -1))[:, mask.flatten()].cpu().numpy()  # N x (H x W)'
+            gt_area /= mask.float().mean().item()
+            masked_pred = preds.reshape(preds.shape[:2] + (-1,))[:, :, mask.flatten().bool()] # N x C x _
+            area = masked_pred.sum(1, keepdims=True).bool().float().mean(-1).cpu().numpy() # N1
             kappa = np.array([1.]) # np.nan_to_num(np.array([fleiss_kappa(aggregate_raters(area.T)[0])]), nan=1.)
-            area = area.astype(np.float32).mean(-1, keepdims=True)  # N x 1
-            severity = preds.float().mean((2, 3)).cpu().numpy() / area  # N x C
-            easi = (area2score(area) * severity)[:, np.newaxis, :]  # N x 1 x C
-            severity = severity[:, np.newaxis, :]  # N x 1 X C
+            severity = masked_pred.float().mean(-1).cpu().numpy() / area  # NC
+            easi = (area2score(area) * severity)[:, np.newaxis, :]  # N1C
+            severity = severity[:, np.newaxis, :]  # N1C
             preds = preds.unsqueeze(1)
         else:
             raise ValueError
+
+        gt_easi = (area2score(gt_area)[np.newaxis, ...] * gt_severity[:, np.newaxis, :, :]).reshape((-1,) + gt_severity.shape[1:])  # N x B x C
+        gt_area = gt_area.squeeze(-1)  # N x B
 
         # Gather results
         self.gt_area.append(gt_area)
@@ -268,12 +271,12 @@ class LitModel(pl.LightningModule):
         with open(f"results/{self.exp_name}/results.pkl", "wb") as f:
             pickle.dump(
                 {
-                    "gt_area": np.concatenate(self.gt_area, axis=1),  # N x B
-                    "gt_severity": np.concatenate(self.gt_severity, axis=1),  # N x B x C
+                    "gt_area": np.concatenate(self.gt_area, axis=1),  # NB
+                    "gt_severity": np.concatenate(self.gt_severity, axis=1),  # NBC
                     "gt_kappa": np.concatenate(self.gt_kappa),  # B
-                    "gt_easi": np.concatenate(self.gt_easi, axis=1),  # N x B x C
-                    "area": np.concatenate(self.area, axis=1),  # N x B
-                    "severity": np.concatenate(self.severity, axis=1),  # N x B x C
+                    "gt_easi": np.concatenate(self.gt_easi, axis=1),  # NBC
+                    "area": np.concatenate(self.area, axis=1),  # NB
+                    "severity": np.concatenate(self.severity, axis=1),  # NBC
                     "kappa": np.concatenate(self.kappa),  # B
                     "easi": np.concatenate(self.easi, axis=1),  # N x B x C
                 },
