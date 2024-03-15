@@ -1,11 +1,12 @@
 num_workers: 47
 
 train:
-  max_epochs: 600
+  max_epochs: 1000
   batch_size: 64
   lr: 1.0e-4
   weight_decay: 1.0e-5
   gamma: 0.95
+  wholebody: False
   loss_kwargs:
     alpha: 1.0e+2
     beta: 1.0e-4

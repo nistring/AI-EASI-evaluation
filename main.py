@@ -1,6 +1,9 @@
 import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
+import torchvision
+torchvision.disable_beta_transforms_warning()
+torch.manual_seed(42)
 
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
@@ -28,22 +31,47 @@ class AtopyDataModule(pl.LightningDataModule):
         self.test_dataset = test_dataset
 
     def setup(self, stage):
-        self.train, self.val = get_dataset("train")
-        # self.test = get_dataset("intra")
+        self.roi_train, self.roi_val = get_dataset("roi_train")
+        self.wb_train, self.wb_val = get_dataset("wb_train")
+
         self.test = get_dataset(self.test_dataset)
         # self.predict = CustomDataset("data/predict", step=self.cfg.predict.step)
 
     def train_dataloader(self):
-        return DataLoader(
-            self.train,
-            batch_size=self.cfg.train.batch_size,
-            num_workers=self.cfg.num_workers,
-            pin_memory=True,
-            shuffle=True,
-        )
+        if self.cfg.train.wholebody:
+            return [
+                DataLoader(
+                    self.roi_train,
+                    batch_size=self.cfg.train.batch_size,
+                    num_workers=self.cfg.num_workers,
+                    pin_memory=True,
+                    shuffle=True,
+                ),
+                DataLoader(
+                    self.wb_train,
+                    batch_size=self.cfg.train.batch_size,
+                    num_workers=self.cfg.num_workers,
+                    pin_memory=True,
+                    shuffle=True,
+                )
+            ]
+        else:
+            return DataLoader(
+                    self.roi_train,
+                    batch_size=self.cfg.train.batch_size,
+                    num_workers=self.cfg.num_workers,
+                    pin_memory=True,
+                    shuffle=True,
+                )
 
     def val_dataloader(self):
-        return DataLoader(self.val, batch_size=self.cfg.train.batch_size, num_workers=self.cfg.num_workers, pin_memory=True)
+        if self.cfg.train.wholebody:
+            return [
+                DataLoader(self.roi_val, batch_size=self.cfg.train.batch_size, num_workers=self.cfg.num_workers, pin_memory=True),
+                DataLoader(self.wb_val, batch_size=self.cfg.train.batch_size, num_workers=self.cfg.num_workers, pin_memory=True)
+            ]
+        else:
+            return DataLoader(self.roi_val, batch_size=self.cfg.train.batch_size, num_workers=self.cfg.num_workers, pin_memory=True)
 
     def test_dataloader(self):
         return DataLoader(self.test, batch_size=self.cfg.test.batch_size, num_workers=self.cfg.num_workers, pin_memory=False)
@@ -77,7 +105,7 @@ class LitModel(pl.LightningModule):
     def on_train_start(self):
         self.logger.log_hyperparams(dict(self.cfg.train))
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch, batch_idx, dataloader_idx=0):
         seg = batch["seg"]  # BlHW (l : labeller)
         seg = seg[:, [self.current_epoch % seg.shape[1]]]
         img = batch["img"]  # BCHW
@@ -96,14 +124,13 @@ class LitModel(pl.LightningModule):
 
         return loss_dict["supervised_loss"]
 
-    def validation_step(self, batch, batch_idx):
-        seg = batch["seg"]  # B x labeller x H x W
-        img = batch["img"]  # B x C x H x W
-        grade = batch["grade"]  # B x C x cls_labellers
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        seg = batch["seg"]  # BlHW
+        img = batch["img"]  # BCHW
+        grade = batch["grade"]  # BCl
         summaries = None
         for i in range(seg.shape[1]):
             for j in range(grade.shape[-1]):
-                # B1HW, BC11 -> BCHW
                 loss_dict = self.model.sum_loss(seg[:, [i]], grade[:, :, [j], None], img)
                 if summaries is None:
                     summaries = loss_dict["summaries"]
@@ -361,7 +388,7 @@ class LitModel(pl.LightningModule):
         mask_patches = patchify(np.pad(mask.cpu().numpy(), pad.cpu().numpy()), (256, 256), self.step).reshape((-1, 256, 256))
         valid = []
         for i in range(mask_patches.shape[0]):
-            if np.any(mask_patches[i] != 0):
+            if np.any(mask_patches[i] > 0):
                 valid.append(i)
         return valid
 
@@ -403,7 +430,7 @@ if __name__ == "__main__":
     parser.add_argument("--phase", type=str, choices=["train", "test", "predict"])
     parser.add_argument("--checkpoint", type=str, help="Path to checkpoint")
     parser.add_argument("--cfg", type=str, default="config.yaml")
-    parser.add_argument("--test-dataset", type=str, default="intra")
+    parser.add_argument("--test-dataset", type=str, default="19_int")
     args = parser.parse_args()
     cfg = load_config(args.cfg)
 
