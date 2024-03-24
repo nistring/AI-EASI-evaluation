@@ -1,2 +1,0 @@
-# python evaluate_images.py --images ../data/NIa_data --model pretrained/model_segmentation_skin_30.pth --model-type FCNResNet101 --save-dir ../data/predict --threshold 0.01
-python evaluate_images.py --images ../data/NIa_data --model pretrained/model_segmentation_realtime_skin_30.pth --model-type BiSeNetV2 --save-dir ../data/predict --threshold 0.2
