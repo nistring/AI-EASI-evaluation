@@ -160,15 +160,11 @@ cython_debug/
 #.idea/
 
 data
-weights/lr_e-5_exdecay_0.99
 results
 nohup.out
 lightning_logs/
-vis
-augmentation.png
 *.run
-samples.gif
-sampling.py
 .vscode
 weights
 figure
+unused_res

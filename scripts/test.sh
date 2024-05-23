@@ -1,1 +1,2 @@
-python main.py --phase test --checkpoint lightning_logs/lr4a2b4/checkpoints/epoch=579-step=3480.ckpt --devices 1 --test-dataset "2021"
+python main.py --phase test --checkpoint lightning_logs/halfweight/whole_body_16_1/checkpoints/epoch=28-step=5365.ckpt --devices 1 --test-dataset "20_ext"
+# python main.py --phase test --checkpoint lightning_logs/halfweight/halfweight_tv_roi/checkpoints/epoch=87-step=4136.ckpt --devices 1 --test-dataset "19_ext"

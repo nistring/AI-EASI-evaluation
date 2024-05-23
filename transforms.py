@@ -2,72 +2,90 @@ import torch
 from torchvision.transforms import v2
 
 class CustomCrop(torch.nn.Module):
-    def __init__(self, size = (256, 256)):
+    def __init__(self, size, th=0.125, n=32):
         super().__init__()
-        self.w, self.h = size
+        self.size = size
+        self.th = th
+        self.n = n
 
     def forward(self, img):
-        x_high = max(img.shape[2] - self.w, 1)
-        y_high = max(img.shape[1] - self.h, 1)
-        while True:
-            x = torch.randint(x_high, (1,)).item()
-            y = torch.randint(y_high, (1,)).item()
-            crop = img[:, y : min(y + self.h, img.shape[1]), x : min(x + self.w, img.shape[2])]
-            if torch.any(crop): # If the cropped image contains at least one pixel of foreground image.
-                break
-        crop = v2.functional.resize(crop, (self.h, self.w), antialias=True)
-        return crop
+        random_size = min(min(img.shape[1:]), torch.randint(self.size[0], self.size[1]+1, (1,)).item())
+        x_high = img.shape[2] - random_size
+        y_high = img.shape[1] - random_size
+        images = []
+        for i in range(self.n): 
+            while True:
+                x = torch.randint(x_high, (1,)).item()
+                y = torch.randint(y_high, (1,)).item()
+                crop = img[:, y : y + random_size, x : x + random_size]
+                if torch.any(crop > 0):
+                    break
+            images.append(crop)
 
-class DownScale(torch.nn.Module):
-    def __init__(self, scale_min=0.25, scale_max=1.):
-        super().__init__()
-        assert (scale_max <= 1.) and (scale_min > 0.) and (scale_min <= scale_max)
-        self.scale_min = scale_min
-        self.scale_max = scale_max
+        return torch.stack(images)
 
-    def forward(self, data):
-        scale = torch.rand(1).item() * (self.scale_max - self.scale_min) + self.scale_min
-        if isinstance(data, tuple):
-            img = data[0]
-        else:
-            img = data
-        size = img.shape[1:]
-        dsize = [round(size[0] * scale), round(size[1] * scale)]
-        img = v2.functional.resize(img, dsize, antialias=True)
-        img = v2.functional.resize(img, size, antialias=True)
-        if isinstance(data, tuple):
-            return img, data[1]
-        else:
-            return img
+test_transforms = v2.Compose(
+    [
+        v2.Resize((256, 256), antialias=True),
+    ]
+)
 
-test_transforms = v2.Compose([
-    v2.Resize((256, 256), antialias=True),
-    # v2.ToDtype(torch.float32, scale=True),
-    v2.ToDtype(torch.float32),
-    v2.Normalize(mean=(0.4461, 0.5334, 0.7040), std=(0.1161, 0.1147, 0.1204)),
-])
+roi_test_transforms = v2.Compose(
+    [
+        v2.RandomHorizontalFlip(),
+        v2.RandomAffine(degrees=180, translate=(0.5, 0.5)),
+        v2.Resize((256, 256), antialias=True),
+    ]
+)
 
+train_transforms = v2.Compose(
+    [
+        v2.RandomHorizontalFlip(),
+        v2.RandomPerspective(),
+        v2.RandomRotation(180),
+        v2.RandomResizedCrop((256, 256), scale=(0.25, 1.0), antialias=True, ratio=(1.0, 1.0)),
+        v2.RandomApply([v2.RandomResize(128, 256, antialias=True), v2.Resize((256, 256), antialias=True)]),
+        v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+    ]
+)
 
-train_transforms = v2.Compose([
-    v2.RandomVerticalFlip(),
-    v2.RandomHorizontalFlip(),
-    v2.RandomPerspective(),
-    v2.RandomResizedCrop((256, 256), (0.8, 1.0), antialias=True, ratio=(1.0, 1.0)),
-    v2.RandomApply([DownScale()]),
-    v2.ColorJitter(brightness=(0.875, 1.125), contrast=(0.5, 1.5), saturation=(0.5, 1.5), hue=(-0.05, 0.05)),
-    # v2.ToDtype(torch.float32, scale=True),
-    v2.ToDtype(torch.float32),
-    v2.Normalize(mean=(0.4461, 0.5334, 0.7040), std=(0.1161, 0.1147, 0.1204)),
-])
+roi_train_transforms = v2.Compose(
+    [
+        v2.RandomHorizontalFlip(),
+        v2.RandomPerspective(),
+        v2.RandomAffine(degrees=180, translate=(0.5, 0.5)),
+        v2.RandomResizedCrop((256, 256), scale=(0.25, 1.0), antialias=True, ratio=(1.0, 1.0)),
+        v2.RandomResize(128, 256, antialias=True),
+        v2.Resize((256, 256), antialias=True),
+        v2.RandomErasing(),
+        v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+    ]
+)
 
 
-wholebody_transforms = v2.Compose([
-    v2.RandomHorizontalFlip(),
-    v2.RandomPerspective(),
-    CustomCrop((256, 256)),
-    v2.RandomApply([DownScale()]),
-    v2.ColorJitter(brightness=(0.875, 1.125), contrast=(0.5, 1.5), saturation=(0.5, 1.5), hue=(-0.05, 0.05)),
-    # v2.ToDtype(torch.float32, scale=True),
-    v2.ToDtype(torch.float32),
-    v2.Normalize(mean=(0.4461, 0.5334, 0.7040), std=(0.1161, 0.1147, 0.1204)),
-])
+wholebody_train_transforms = v2.Compose(
+    [
+        v2.Pad(128),
+        v2.RandomHorizontalFlip(),
+        v2.RandomPerspective(),
+        v2.RandomRotation(180),
+        CustomCrop((256, 512)),
+        v2.Resize((256, 256), antialias=True),
+        v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+    ]
+)
+
+wholebody_test_transforms = v2.Compose(
+    [
+        v2.Pad(128),
+        CustomCrop((384, 384)),
+        v2.Resize((256, 256), antialias=True)
+    ]
+)
+
+norm_transforms = v2.Compose(
+    [
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=(0.7040, 0.5334, 0.4461), std=(0.1202, 0.1145, 0.1158)),
+    ]
+)

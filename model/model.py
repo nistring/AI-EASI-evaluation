@@ -269,7 +269,7 @@ class HierarchicalProbUNet(nn.Module):
         # Weights for class imbalance
         if weights is None:
             weights = torch.ones((num_classes, num_cuts + 1))
-        self._weights = weights
+        self._weights = torch.Tensor(weights)
 
     def _apply(self, fn):
         super(HierarchicalProbUNet, self)._apply(fn)
@@ -320,13 +320,8 @@ class HierarchicalProbUNet(nn.Module):
 
         return loss
 
-    def rec_loss(self, seg: torch.Tensor, grade: torch.Tensor, img: torch.Tensor, mean: bool = False):
-        seg = seg * grade  # BCHW
+    def rec_loss(self, seg: torch.Tensor, img: torch.Tensor, mean: bool = False):
         _q_sample, _p_sample_z_q, logits = self.reconstruct(seg, img, mean=mean)
-
-        # seg[..., 0] = 1.
-        # grade = grade == 0 # BC11
-        # seg[..., 0] = seg[..., 0] * grade
         pred = log_cumulative(self.cutpoints * self._alpha, logits)  # BCHWc
         
         # loss = self.ce_loss(pred, seg)
@@ -343,11 +338,11 @@ class HierarchicalProbUNet(nn.Module):
 
         return kl_dict
 
-    def sum_loss(self, seg: torch.Tensor, grade: torch.Tensor, img: torch.Tensor, mean: bool = False):
+    def sum_loss(self, seg: torch.Tensor, img: torch.Tensor, mean: bool = False):
         summaries = {}
 
         # rec loss
-        _q_sample, _p_sample_z_q, rec_loss = self.rec_loss(seg, grade, img, mean)
+        _q_sample, _p_sample_z_q, rec_loss = self.rec_loss(seg, img, mean)
         summaries["rec_loss"] = rec_loss
 
         # kl loss

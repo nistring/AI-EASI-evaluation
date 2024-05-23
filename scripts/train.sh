@@ -1,2 +1,2 @@
 python main.py --devices 4 --phase train \
-    # --checkpoint lightning_logs/version_0/checkpoints/epoch=5-step=360.ckpt
+     --checkpoint lightning_logs/halfweight/halfweight_tv_roi/checkpoints/epoch=87-step=4136.ckpt
