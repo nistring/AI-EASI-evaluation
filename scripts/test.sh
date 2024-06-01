@@ -1,2 +1,2 @@
-python main.py --phase test --checkpoint lightning_logs/halfweight/whole_body_16_1/checkpoints/epoch=28-step=5365.ckpt --devices 1 --test-dataset "20_ext"
-# python main.py --phase test --checkpoint lightning_logs/halfweight/halfweight_tv_roi/checkpoints/epoch=87-step=4136.ckpt --devices 1 --test-dataset "19_ext"
+python main.py --phase test --checkpoint lightning_logs/whole_body_8_1/checkpoints/epoch=49-step=6200.ckpt --devices 1 --test-dataset "20_ext"
+python main.py --phase test --checkpoint lightning_logs/whole_body_8_1/checkpoints/epoch=49-step=6200.ckpt --devices 1 --test-dataset "20_int"

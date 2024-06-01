@@ -2,7 +2,14 @@ import torch
 from torchvision.transforms import v2
 
 class CustomCrop(torch.nn.Module):
-    def __init__(self, size, th=0.125, n=32):
+    def __init__(self, size, th=0.125, n=4):
+        """A custom transformation module that selectively crops nonzero area.
+
+        Args:
+            size (List(int, int)): Size of the patch.
+            th (float, optional): The threshold value of minimum proportion of nonzero area. Defaults to 0.125.
+            n (int, optional): Number of patches to be extracted from a single image. Defaults to 4.
+        """
         super().__init__()
         self.size = size
         self.th = th
@@ -24,12 +31,14 @@ class CustomCrop(torch.nn.Module):
 
         return torch.stack(images)
 
+# ROI/whole-body test
 test_transforms = v2.Compose(
     [
         v2.Resize((256, 256), antialias=True),
     ]
 )
 
+# ROI tuning(val) for training whole-body model
 roi_test_transforms = v2.Compose(
     [
         v2.RandomHorizontalFlip(),
@@ -38,6 +47,7 @@ roi_test_transforms = v2.Compose(
     ]
 )
 
+# ROI train
 train_transforms = v2.Compose(
     [
         v2.RandomHorizontalFlip(),
@@ -49,6 +59,7 @@ train_transforms = v2.Compose(
     ]
 )
 
+# ROI/whole-body train
 roi_train_transforms = v2.Compose(
     [
         v2.RandomHorizontalFlip(),
@@ -62,7 +73,7 @@ roi_train_transforms = v2.Compose(
     ]
 )
 
-
+# whole-body train
 wholebody_train_transforms = v2.Compose(
     [
         v2.Pad(128),
@@ -75,6 +86,7 @@ wholebody_train_transforms = v2.Compose(
     ]
 )
 
+# whole-body tuning
 wholebody_test_transforms = v2.Compose(
     [
         v2.Pad(128),

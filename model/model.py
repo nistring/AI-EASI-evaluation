@@ -1,14 +1,22 @@
+# Adapted from
+# https://github.com/Zerkoar/hierarchical_probabilistic_unet_pytorch
+# https://github.com/google-deepmind/deepmind-research/blob/master/hierarchical_probabilistic_unet
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
 from torch.distributions import Normal, kl
-from torch.distributions.distribution import Distribution
 
 from .model_utils import *
 from typing import List, Tuple, Optional
 
 
 class _HierarchicalCore(nn.Module):
+    """A U-Net encoder-decoder with a full encoder and a truncated decoder.
+
+    The truncated decoder is interleaved with the hierarchical latent space and
+    has as many levels as there are levels in the hierarchy plus one additional
+    level.
+    """
     def __init__(
         self,
         latent_dims,
@@ -19,6 +27,24 @@ class _HierarchicalCore(nn.Module):
         convs_per_block=3,
         blocks_per_level=3,
     ):
+        """Initializes a HierarchicalCore.
+
+        Args:
+            latent_dims (List): List of integers specifying the dimensions of the latents at
+                each scale. The length of the list indicates the number of U-Net decoder
+                scales that have latents.
+            in_channels (int): An integer specifying the number of input channel.
+            channels_per_block (List[int]): A list of integers specifying the number of output
+                channels for each encoder block.
+            down_channels_per_block (List[int], optional): A list of integers specifying the number of
+                intermediate channels for each encoder block or None. If None, the
+                intermediate channels are chosen equal to channels_per_block. Defaults to None.
+            activation_fn (torch.nn.Module, optional): A callable activation function. Defaults to nn.ReLU().
+            convs_per_block (int, optional): An integer specifying the number of convolutional layers. Defaults to 3.
+            blocks_per_level (int, optional): An integer specifying the number of residual blocks per
+                level. Defaults to 3.
+        """
+
         super(_HierarchicalCore, self).__init__()
         self._latent_dims = latent_dims
         self._channels_per_block = channels_per_block
@@ -82,6 +108,35 @@ class _HierarchicalCore(nn.Module):
         skip_encoder: Optional[List[torch.Tensor]] = None,
         mean: bool = False,
     ) -> Tuple[List[torch.Tensor], torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
+        """
+        Args:
+            inputs (torch.Tensor): A tensor of shape (b,c,h,w). When using the module as a prior the
+                `inputs` tensor should be a batch of images. When using it as a posterior
+                the tensor should be a (batched) concatentation of images and
+                segmentations.
+            z_q (Optional[List[torch.Tensor]], optional): None or a list of tensors. If not None, z_q provides external latents
+                to be used instead of sampling them. This is used to employ posterior
+                latents in the prior during training. Therefore, if z_q is not None, the
+                value of `mean` is ignored. If z_q is None, either the distributions
+                mean is used (in case `mean` for the respective scale is True) or else
+                a sample from the distribution is drawn. Defaults to None.
+            skip_encoder (Optional[List[torch.Tensor]], optional): A list of tensors that contains
+                the output feature map of the encoder. If the skip_encoder is not none, a redundant
+                the output feature skips the encoder network and directly processed by the decoder. Defaults to None.
+            mean (bool, optional): A boolean or a list of booleans. If a boolean, it specifies whether
+                or not to use the distributions' means in ALL latent scales. If a list,
+                each bool therein specifies whether or not to use the scale's mean. If
+                False, the latents of the scale are sampled.. Defaults to False.
+
+        Returns:
+            Tuple[List[torch.Tensor], torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
+                 A Tuple holding the output feature map of the truncated U-Net
+                decoder under key 'decoder_features', a list of the U-Net encoder features
+                produced at the end of each encoder scale under key 'encoder_outputs', a
+                list of the predicted distributions at each scale under key
+                'distributions', a list of the used latents at each scale under the key
+                'used_latents'.       
+        """
         if skip_encoder is not None:
             encoder_outputs = skip_encoder
         else:
@@ -133,6 +188,11 @@ class _HierarchicalCore(nn.Module):
 
 
 class _StitchingDecoder(nn.Module):
+    """A module that completes the truncated U-Net decoder.
+
+    Using the output of the HierarchicalCore this module fills in the missing
+    decoder levels such that together the two form a symmetric U-Net.
+    """
     def __init__(
         self,
         latent_dims,
@@ -144,6 +204,24 @@ class _StitchingDecoder(nn.Module):
         convs_per_block=3,
         blocks_per_level=3,
     ):
+        """Initializes a StichtingDecoder.
+
+        Args:
+            latent_dims (List[int]): List of integers specifying the dimensions of the latents at
+                each scale. The length of the list indicates the number of U-Net
+                decoder scales that have latents.
+            in_channels (int): An integer specifying the number of input channel.
+            channels_per_block (List[int]): A list of integers specifying the number of output
+                channels for each encoder block.
+            num_classes (int): An integer specifying the number of segmentation classes.
+            down_channels_per_block (List[int], optional): A list of integers specifying the number of
+                intermediate channels for each encoder block. If None, the
+                intermediate channels are chosen equal to channels_per_block.. Defaults to None.
+            activation_fn (torch.nn.Module, optional): A callable activation function. Defaults to nn.ReLU().
+            convs_per_block (int, optional): An integer specifying the number of convolutional layers. Defaults to 3.
+            blocks_per_level (int, optional): An integer specifying the number of residual blocks per
+                level. Defaults to 3.
+        """
         super(_StitchingDecoder, self).__init__()
         self._latent_dims = latent_dims
         self.in_channels = in_channels
@@ -183,6 +261,15 @@ class _StitchingDecoder(nn.Module):
         self.last_layer.apply(init_weights_orthogonal_normal)
 
     def forward(self, encoder_features: List[torch.Tensor], decoder_features: torch.Tensor) -> torch.Tensor:
+        """Returns the segmentation logits.
+
+        Args:
+            encoder_features (List[torch.Tensor]): A list of tensors of shape (b,c_i,h_i,w_i).
+            decoder_features (torch.Tensor): A tensor of shape (b,h,w,c).
+
+        Returns:
+            torch.Tensor: Logits, i.e. a tensor of shape (b,num_classes,h,w).
+        """
         start_level = self.start_level
         for i, decoder in enumerate(self.decoder):
             decoder_features = decoder(decoder_features)
@@ -195,6 +282,7 @@ class _StitchingDecoder(nn.Module):
 
 
 class HierarchicalProbUNet(nn.Module):
+    """A Hierarchical Probabilistic U-Net."""
     def __init__(
         self,
         latent_dims=(1, 1, 1, 1),
@@ -209,6 +297,27 @@ class HierarchicalProbUNet(nn.Module):
         num_cuts=3,
         weights=None,
     ):
+        """Initializes a HierarchicalProbUNet.
+
+        Args:
+            latent_dims (tuple, optional): Tuple of integers specifying the dimensions of the latents at
+                each scales. The length of the list indicates the number of U-Net
+                decoder scales that have latents. Defaults to (1, 1, 1, 1).
+            in_channels (int, optional): An integer specifying the number of input channel. Defaults to 3.
+            channels_per_block (List[int], optional): A list of integers specifying the number of output
+                channels for each encoder block. Defaults to None.
+            num_classes (int, optional): An integer specifying the number of segmentation classes. Defaults to 4.
+            down_channels_per_block (List[int], optional): A list of integers specifying the number of
+                intermediate channels for each encoder block. If None, the
+                intermediate channels are chosen equal to channels_per_block. Defaults to None.
+            activation_fn (torch.nn.Module, optional): A callable activation function. Defaults to nn.ReLU().
+            convs_per_block (int, optional): An integer specifying the number of convolutional layers. Defaults to 3.
+            blocks_per_level (int, optional): An integer specifying the number of residual blocks per
+                level. Defaults to 3.
+            loss_kwargs (Dict, optional): None or dictionary specifying the loss setup. Defaults to None.
+            num_cuts (int, optional): An integer specifying the number of threshold values for ordinal regression. Defaults to 3.
+            weights (torch.Tensor, optional): A tensor containing weights to compensate class imbalance. Defaults to None.
+        """
         super(HierarchicalProbUNet, self).__init__()
 
         base_channels = 24
@@ -278,12 +387,38 @@ class HierarchicalProbUNet(nn.Module):
         return self
 
     def forward(self, seg: torch.Tensor, img: torch.Tensor, mean: bool):
+        """_summary_
+
+        Args:
+            seg (torch.Tensor): A tensor of shape (b, num_classes, h, w).
+            img (torch.Tensor): A tensor of shape (b, c, h, w)
+            mean (bool): A boolean or a list of booleans. If a boolean, it specifies whether
+                or not to use the distributions' means in ALL latent scales. If a list,
+                each bool therein specifies whether or not to use the scale's mean. If
+                False, the latents of the scale are sampled.
+
+        Returns:
+            Output feature maps of the prior and posterior networks.
+        """
         _q_sample = self.posterior(inputs=torch.concat([seg, img], dim=1), mean=mean, z_q=[])
         _p_sample_z_q = self.prior(inputs=img, z_q=_q_sample[3])  # used_latents
         return _q_sample, _p_sample_z_q
 
     @torch.jit.export
     def sample(self, img: torch.Tensor, mc_n: int, mean: bool = False):
+        """Sample segmentations from the prior, given an input image.
+
+        Args:
+            img (torch.Tensor): A tensor of shape (b, c, h, w).
+            mc_n (int): An integer of Monte Carlo sampling trials.
+            mean (bool, optional): A boolean or a list of booleans. If a boolean, it specifies whether
+                or not to use the distributions' means in ALL latent scales. If a list,
+                each bool therein specifies whether or not to use the scale's mean. If
+                False, the latents of the scale are sampled. Defaults to False.
+
+        Returns:
+            torch.Tensor: A tensor of shape (mc_n, b, c, h, w, num_cut+1).
+        """
 
         with torch.no_grad():
             encoder_features, decoder_features, _, _ = self.prior(inputs=img, mean=mean)
@@ -302,17 +437,46 @@ class HierarchicalProbUNet(nn.Module):
             return log_cumulative(self.cutpoints * self._alpha, logits).reshape(logit_shape + (-1,))  # NBCHWc
 
     def reconstruct(self, seg: torch.Tensor, img: torch.Tensor, mean: bool):
+        """Reconstruct a segmentation using the posterior.
+
+        Args:
+            seg (torch.Tensor): A tensor of shape (b, num_classes, h, w).
+            img (torch.Tensor): A tensor of shape (b, c, h, w).
+            mean (bool): A boolean, specifying whether to sample from the full hierarchy of
+                the posterior or use the posterior means at each scale of the hierarchy.
+
+        Returns:
+            A segmentation tensor of shape (b, num_classes, h, w) with outputs of the prior and posterior.
+        """
         _q_sample, _p_sample_z_q = self.forward(seg, img, mean)
         encoder_features, decoder_features, _, _ = _p_sample_z_q
 
         return _q_sample, _p_sample_z_q, self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features)
 
     def dice_loss(self, pred: torch.Tensor, seg: torch.Tensor):
+        """Dice loss
+
+        Args:
+            pred (torch.Tensor): Predicted class probabilities
+            seg (torch.Tensor): True class assignment.
+
+        Returns:
+            torch.Tensor: A tensor of shape (b,)
+        """
         loss = dice_score(pred, seg) * self._weights  # BCc
         mask = loss != 0
         return (1 - (loss * mask).sum(2) / mask.sum(2)).sum(1).mean() # B
 
     def ce_loss(self, pred: torch.Tensor, seg: torch.Tensor):
+        """Cross-entropy loss
+
+        Args:
+            pred (torch.Tensor): Predicted class probabilities
+            seg (torch.Tensor): True class assignment.
+
+        Returns:
+            torch.Tensor:
+        """
         loss = 0.
         pred = torch.log(pred.permute((0, 1, 4, 2, 3)).contiguous().clamp_min(1.0e-7)) # BCcHW
         for i in range(pred.shape[1]):
@@ -321,6 +485,17 @@ class HierarchicalProbUNet(nn.Module):
         return loss
 
     def rec_loss(self, seg: torch.Tensor, img: torch.Tensor, mean: bool = False):
+        """Reconstruction loss
+
+        Args:
+            seg (torch.Tensor): A tensor of shape (b, num_classes, h, w).
+            img (torch.Tensor): A tensor of shape (b, c, h, w).
+            mean (bool, optional): A boolean, specifying whether to sample from the full hierarchy of
+                the posterior or use the posterior means at each scale of the hierarchy. Defaults to False.
+
+        Returns:
+            Reconstruction loss
+        """
         _q_sample, _p_sample_z_q, logits = self.reconstruct(seg, img, mean=mean)
         pred = log_cumulative(self.cutpoints * self._alpha, logits)  # BCHWc
         
@@ -330,6 +505,16 @@ class HierarchicalProbUNet(nn.Module):
         return _q_sample, _p_sample_z_q, loss
 
     def kl_divergence(self, q_dists: torch.Tensor, p_dists: torch.Tensor):
+        """Kullback-Leibler divergence between the posterior and the prior.
+
+        Args:
+            q_dists (torch.Tensor): A distribution of latent variables of the posterior.
+            p_dists (torch.Tensor): A distribution of latent variables of the prior.
+
+        Returns:
+            Dict[torch.Tensor]: A dictionary with keys indexing the hierarchy's levels and corresponding
+                values holding the KL-term for each level (per batch).
+        """
         kl_dict = {}
         for level, (q, p) in enumerate(zip(q_dists, p_dists)):
             kl_per_pixel = kl.kl_divergence(p, q)
@@ -339,6 +524,18 @@ class HierarchicalProbUNet(nn.Module):
         return kl_dict
 
     def sum_loss(self, seg: torch.Tensor, img: torch.Tensor, mean: bool = False):
+        """The full training objective, ELBO.
+
+        Args:
+            seg (torch.Tensor): A tensor of shape (b, num_classes, h, w).
+            img (torch.Tensor): A tensor of shape (b, c, h, w).
+            mean (bool, optional): A boolean, specifying whether to sample from the full hierarchy of
+                the posterior or use the posterior means at each scale of the hierarchy. Defaults to False.
+
+        Returns:
+            A dictionary holding the loss (with key 'loss') and the tensorboard
+            summaries (with key 'summaries').
+        """
         summaries = {}
 
         # rec loss

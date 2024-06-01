@@ -13,8 +13,8 @@ def cal_EASI(area, severity):
     """Calculates EASI from area(0-1) and severity
 
     Args:
-        area (_type_): N
-        severity (_type_): N x C
+        area (np.ndarray): N
+        severity (np.ndarray): N x C
 
     Returns:
         _type_: Mean and std of area and severity score plus EASI
@@ -27,6 +27,14 @@ def cal_EASI(area, severity):
 
 
 def area2score(area):
+    """A mapping function that converts 0-1 scale area proportion to area score for EASI.
+
+    Args:
+        area (np.ndarray): Proportion of area in 0-1 scale.
+
+    Returns:
+        np.ndarray: Converted area score.
+    """
     score = 6.25 * area + 0.375
     score[area > 0.9] = 6.
     score[area < 0.1] = 1.
@@ -35,7 +43,7 @@ def area2score(area):
 
 
 def heatmap(ori, pred):
-    """_summary_
+    """Overlays heatmap results on an original image.
 
     Args:
         ori (torch.Tensor): H x W x 3

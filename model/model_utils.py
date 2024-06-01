@@ -1,7 +1,8 @@
+# Adapted from
+# https://github.com/Zerkoar/hierarchical_probabilistic_unet_pytorch
+# https://github.com/google-deepmind/deepmind-research/blob/master/hierarchical_probabilistic_unet
 import torch.nn as nn
 import torch
-import numpy as np
-import torch.nn.functional as F
 
 
 def init_weights_orthogonal_normal(m):
@@ -11,7 +12,7 @@ def init_weights_orthogonal_normal(m):
 
 
 def dice_score(output: torch.Tensor, target: torch.Tensor, smooth: float = 0.0, eps: float = 1e-7) -> torch.Tensor:
-    """_summary_
+    """Calculates dice score.
 
     Args:
         output (torch.Tensor):
@@ -60,6 +61,15 @@ class Res_block(nn.Module):
         activation_fn=nn.ReLU(),
         convs_per_block=3,
     ):
+        """A pre-activated residual block.
+
+        Args:
+            in_channels (int): An integer specifying the number of input channels.
+            out_channels (int): An integer specifying the number of output channels.
+            n_down_channels (int, optional): An integer specifying the number of intermediate channels.. Defaults to None.
+            activation_fn (torch.nn.Module, optional): A callable activation function.. Defaults to nn.ReLU().
+            convs_per_block (int, optional): An Integer specifying the number of convolutional layers.. Defaults to 3.
+        """
         #  input_features: A tensor of shape (b, c, h, w).
         super(Res_block, self).__init__()
         self.n_down_channels = n_down_channels
@@ -100,6 +110,11 @@ class Res_block(nn.Module):
 
 class Resize_up(nn.Module):
     def __init__(self, scale=2):
+        """Nearest neighbor rescaling-operation for the input features.
+
+        Args:
+            scale (int, optional): An integer specifying the scaling factor.. Defaults to 2.
+        """
         super(Resize_up, self).__init__()
         assert scale >= 1
         self.scale = scale
@@ -111,6 +126,11 @@ class Resize_up(nn.Module):
 
 class Resize_down(nn.Module):
     def __init__(self, scale=2):
+        """Average pooling rescaling-operation for the input features.
+
+        Args:
+            scale (int, optional): An integer specifying the scaling factor. Defaults to 2.
+        """
         super(Resize_down, self).__init__()
         assert scale >= 1
         self.scale = scale
