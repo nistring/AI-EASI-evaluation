@@ -1,7 +1,7 @@
 import numpy as np
 import yaml
 from easydict import EasyDict as edict
-
+import torch
 
 def load_config(path):
     with open(path) as f:
@@ -9,21 +9,21 @@ def load_config(path):
         return config
 
 
-def cal_EASI(area, severity):
-    """Calculates EASI from area(0-1) and severity
+def cal_EASI(preds):
+    # area
+    area = (preds.sum(2) > 1).reshape(preds.shape[:2] + (-1,)).float().mean(-1, keepdims=True).cpu().numpy()  # BN1
+    mean_area = area.mean(1, keepdims=True) # B11
+    area = area2score(area)  # BN1
 
-    Args:
-        area (np.ndarray): N
-        severity (np.ndarray): N x C
+    # severity
+    severity = preds.float().mean(-1).cpu().numpy() / mean_area  # BNC
+    severity = 0.5 * (severity + severity.mean(2, keepdims=True))  # BNC
+    severity = np.nan_to_num(severity * area.astype(bool))  # BNC
 
-    Returns:
-        _type_: Mean and std of area and severity score plus EASI
-    """
-    if area.shape[0] == severity.shape[0]:
-        EASI = area * severity.sum(1)  # N
-    else:
-        EASI = area[np.newaxis, :] * severity.sum(1, keepdims=True)  # N x N'
-    return area.mean(), area.std(), severity.mean(0), severity.std(0), EASI.mean(), EASI.std()
+    # easi
+    easi = area2score(mean_area) * severity  # BNC
+
+    return area.squeeze(-1), severity, easi
 
 
 def area2score(area):
@@ -58,3 +58,41 @@ def heatmap(ori, pred):
         0.0,
         255,
     ).astype(np.uint8)
+
+
+def generalized_energy_distance(s, y):
+    """Calculate the generalized energy distance(maximum mean discrepancy) with L1 distance as a kernel
+
+    Args:
+        s (torch.Tensor): samples; B x N x C x H x W
+        y (torch.Tensor): ground truth; B x M x C x H x W
+
+    Returns:
+        _type_: _description_
+    """
+    B, N, C = s.shape[:3]
+    M = y.shape[1]
+
+    # 0-3 to 0-1 scale
+    s = s / (C-1)
+    y = y / (C-1)
+
+    dSY, dSS, dYY = torch.zeros(B).to(s.device), torch.zeros(B).to(s.device), torch.zeros(B).to(s.device)
+
+    for i in range(N):
+        for j in range(M):
+            dSY += (s[:, i]-y[:, j]).abs().mean((1, 2, 3)) # B
+    dSY *= (2 / N / M)    
+
+    for i in range(N):
+        for j in range(N):
+            dSS += (s[:, i]-s[:, j]).abs().mean((1, 2, 3)) # B
+    dSS /= (N * N)
+
+    for i in range(M):
+        for j in range(M):
+            dYY += (y[:, i]-y[:, j]).abs().mean((1, 2, 3)) # B
+    dYY /= (M * M)
+
+    ged = (dSY - dSS - dYY).cpu().numpy()
+    return ged

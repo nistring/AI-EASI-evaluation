@@ -23,8 +23,8 @@ if __name__ == "__main__":
         results = pickle.load(f)
 
     # area
-    area = results["area"].mean(0)
-    gt_area = results["gt_area"].mean(0)
+    area = results["area"].mean(1)
+    gt_area = results["gt_area"].mean(1)
     df = pd.DataFrame(data={"Pred.": area, "True": gt_area})
     lm = sns.regplot(data=df, x="True", y="Pred.", scatter_kws={"alpha":0.5}, robust=robust, x_jitter=0.1)
     lm.set(xlim=(-0.1, 6.1), ylim=(-0.1, 6.1))
@@ -39,23 +39,9 @@ if __name__ == "__main__":
     plt.savefig(f"figure/{args.exp_name}/{args.exp_name}_area.png")
     plt.clf()
 
-    # kappa
-    kappa = results["kappa"]
-    gt_kappa = results["gt_kappa"]
-    df = pd.DataFrame(data={"Pred.": kappa, "True": gt_kappa})
-    lm = sns.scatterplot(data=df, x="True", y="Pred.", color="0.5", alpha=0.5, legend=False)
-    # lm.set(title=f"Spearman's rho on fleiss k of {args.exp_name}'s area")
-    lm.set(xlim=(-1.05, 1.05), ylim=(-0.05, 1.05))
-    lm.set(xlabel="True kappa", ylabel="Predicted kappa", title='')
-    r, p = spearmanr(gt_kappa, kappa, alternative="greater")
-    # lm.text(-0.9, 0.1, "r = {:.3f}, p = {:.3e}".format(r, p))
-    plt.tight_layout()
-    plt.savefig(f"figure/{args.exp_name}/{args.exp_name}_kappa.png")
-    plt.clf()
-
     # EASI mean
-    easi = results["easi"].sum(2).mean(0)
-    gt_easi = results["gt_easi"].sum(2).mean(0)
+    easi = results["easi"].sum(2).mean(1)
+    gt_easi = results["gt_easi"].sum(2).mean(1)
     df = pd.DataFrame(data={"Pred.": easi, "True": gt_easi})
     lm = sns.regplot(data=df, x="True", y="Pred.", scatter_kws={"alpha":0.5}, robust=robust)
     lm.set(xlim=(-1., 73.), ylim=(-1., 73.))
@@ -70,8 +56,8 @@ if __name__ == "__main__":
     plt.clf()
 
     # EASI std
-    easi = results["easi"].sum(2).std(0)
-    gt_easi = results["gt_easi"].sum(2).std(0)
+    easi = results["easi"].sum(2).std(1)
+    gt_easi = results["gt_easi"].sum(2).std(1)
     df = pd.DataFrame(data={"Pred.": easi, "True": gt_easi})
     lm = sns.scatterplot(data=df, x="True", y="Pred.", color="0.5", alpha=0.5, legend=False)
     # lm = sns.kdeplot(data=df, x="True", y="Pred.", fill=True, color="k")
@@ -85,8 +71,8 @@ if __name__ == "__main__":
     plt.clf()
 
     # Severity
-    severity = results["severity"].mean(0)
-    gt_severity = results["gt_severity"].mean(0)
+    severity = results["severity"].mean(1)
+    gt_severity = results["gt_severity"].mean(1)
     B = severity.shape[0]
     Sign = np.array(["Erythema", "Induration", "Excoriation", "Lichenification"] * B)
 
@@ -112,8 +98,8 @@ if __name__ == "__main__":
     plt.clf()
 
     # EASI mean by sign
-    easi = results["easi"].mean(0)
-    gt_easi = results["gt_easi"].mean(0)
+    easi = results["easi"].mean(1)
+    gt_easi = results["gt_easi"].mean(1)
     df = pd.DataFrame(data={"Pred.": easi.reshape(-1), "True": gt_easi.reshape(-1), "Sign": Sign})
     lm = sns.lmplot(data=df, x="True", y="Pred.", col="Sign", hue="Sign", scatter_kws={"alpha":0.5}, legend=False, robust=robust)
     lm.set(xlim=(-0.5, 18.5), ylim=(-0.5, 18.5))
@@ -132,8 +118,8 @@ if __name__ == "__main__":
     plt.clf()
 
     # EASI std by sign
-    easi = results["easi"].std(0)
-    gt_easi = results["gt_easi"].std(0)
+    easi = results["easi"].std(1)
+    gt_easi = results["gt_easi"].std(1)
 
     df = pd.DataFrame(data={"Pred.": easi.reshape(-1), "True": gt_easi.reshape(-1), "Sign": Sign})
     lm = sns.lmplot(data=df, x="True", y="Pred.", col="Sign", hue="Sign", scatter_kws={"alpha":0.5}, legend=False, fit_reg=False)
@@ -147,3 +133,11 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig(f"figure/{args.exp_name}/{args.exp_name}_easi_std_by_sign.png")
     plt.clf()
+
+    # Histogram of GED
+    if "ged" in results.keys():
+        df = pd.DataFrame(data={"GED": results["ged"]})
+        sns.histplot(data=df, x="GED")
+        plt.tight_layout()
+        plt.savefig(f"figure/{args.exp_name}/{args.exp_name}_ged.png")
+        plt.clf()

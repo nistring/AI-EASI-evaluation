@@ -422,19 +422,19 @@ class HierarchicalProbUNet(nn.Module):
 
         with torch.no_grad():
             encoder_features, decoder_features, _, _ = self.prior(inputs=img, mean=mean)
-            logits = self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features).unsqueeze(0)
+            logits = self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features).unsqueeze(1)
 
             for i in range(mc_n - 1):
                 encoder_features, decoder_features, _, _ = self.prior(inputs=img, mean=mean, skip_encoder=encoder_features)
                 logits = torch.cat(
-                    (logits, self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features).unsqueeze(0)),
-                    dim=0,
+                    (logits, self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features).unsqueeze(1)),
+                    dim=1,
                 )
 
             logit_shape = logits.shape
-            logits = logits.reshape((-1,) + logit_shape[2:])  # (NB)CHW
+            logits = logits.reshape((-1,) + logit_shape[2:])  # (BN)CHW
 
-            return log_cumulative(self.cutpoints * self._alpha, logits).reshape(logit_shape + (-1,))  # NBCHWc
+            return log_cumulative(self.cutpoints * self._alpha, logits).reshape(logit_shape + (-1,))  # BNCHWc
 
     def reconstruct(self, seg: torch.Tensor, img: torch.Tensor, mean: bool):
         """Reconstruct a segmentation using the posterior.

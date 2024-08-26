@@ -6,7 +6,6 @@ from torchvision.transforms import v2
 import cv2
 from tqdm import tqdm
 from patchify import patchify
-from sklearn.metrics import cohen_kappa_score
 import pickle
 from sklearn.model_selection import train_test_split
 from transforms import *
@@ -14,6 +13,7 @@ from torchvision.io import read_image, ImageReadMode
 from pathlib import Path
 from utils import area2score
 from torchvision import tv_tensors
+
 
 class WholeBodyPredictDataset(Dataset):
     def __init__(self, img_dir_path, mask_path, transforms=test_transforms, step_size=96):
@@ -31,7 +31,7 @@ class WholeBodyPredictDataset(Dataset):
         self.img_path = os.listdir(img_dir_path)
 
         # Whole body
-        self.patch_size = 256 * 1.5 # 645 * 1.5
+        self.patch_size = 256 * 1.5  # 645 * 1.5
         self.step = step_size
 
     def __getitem__(self, i):
@@ -64,7 +64,9 @@ class WholeBodyPredictDataset(Dataset):
         img = cv2.cvtColor(np.pad(ori_img, pad_width), cv2.COLOR_BGR2RGB)
 
         # Normalize and patchify
-        patches = norm_transforms(self.transforms(torch.Tensor(patchify(np.transpose(img, (2, 0, 1)), (3, 256, 256), step=self.step)[0])) / 255)  # NyNxC3HW
+        patches = norm_transforms(
+            self.transforms(torch.Tensor(patchify(np.transpose(img, (2, 0, 1)), (3, 256, 256), step=self.step)[0])) / 255
+        )  # NyNxC3HW
 
         return {
             "patches": patches,
@@ -76,7 +78,8 @@ class WholeBodyPredictDataset(Dataset):
 
     def __len__(self):
         return len(self.img_path)
-    
+
+
 class ROIPredict(Dataset):
     def __init__(self, img_dir_path, transforms=test_transforms):
         """Whole-body image dataset for prediction step
@@ -90,9 +93,9 @@ class ROIPredict(Dataset):
         self.transforms = transforms
 
     def __getitem__(self, i):
-        img = read_image(str(Path(self.img_dir_path) / self.img_path[i])) # 3HW
+        img = read_image(str(Path(self.img_dir_path) / self.img_path[i]))  # 3HW
         img = self.transforms(img)
-        ori_img = torch.permute(torch.flip(img, dims=(0,)), dims=(1, 2, 0)) # 3(RGB)HW -> HW3(BGR)
+        ori_img = torch.permute(torch.flip(img, dims=(0,)), dims=(1, 2, 0))  # 3(RGB)HW -> HW3(BGR)
         img = norm_transforms(img)
 
         return {"img": img, "ori_img": ori_img, "file_name": self.img_path[i].split(".")[0] + ".jpg"}
@@ -109,7 +112,7 @@ class WholeBodyTestDataset(Dataset):
             img_path (str): Directory path where images are stored.
             seg_path (str): Directory path where segment labelse are stored.
             class_path (str): Path where the severity class information is stored.
-            transforms : 
+            transforms :
             idx (List): List of individual image file paths.
             mask_path (str): Directory path where masks are stored.
             step_size (int):
@@ -121,22 +124,23 @@ class WholeBodyTestDataset(Dataset):
         self.mask_path = mask_path
 
         # Whole body
-        self.patch_size = 256 * 1.5 # 645 * 1.5
+        self.patch_size = 256 * 1.5  # 645 * 1.5
         self.step = step_size
 
         with open(class_path, "rb") as f:
             data = pickle.load(f)
             index = list(data["index"])
         self.anno = data["annotations"][[index.index(os.path.basename(x).split(".")[0]) for x in self.idx], :4]
-        self.area = data["annotations"][[index.index(os.path.basename(x).split(".")[0]) for x in self.idx], 4] if self.seg_path is None else None
+        self.area = (
+            data["annotations"][[index.index(os.path.basename(x).split(".")[0]) for x in self.idx], 4] if self.seg_path is None else None
+        )
 
     def __getitem__(self, i):
         # Load
         file = self.idx[i]
-        ori_img = cv2.imread(str(Path(self.img_path) / (file.split(".")[0] + ".png"))) # ".jpg")))
-        grade = torch.LongTensor(self.anno[i])  # Cl
+        ori_img = cv2.imread(str(Path(self.img_path) / (file.split(".")[0] + ".png")))  # ".jpg")))
+        grade = torch.LongTensor(self.anno[i]).T  # lC
         mask = cv2.imread(str(Path(self.mask_path) / (file.split(".")[0] + ".png")), 0)
-        
 
         # Masking
         ori_img = ori_img * (mask > 0)[:, :, np.newaxis]
@@ -157,7 +161,7 @@ class WholeBodyTestDataset(Dataset):
         # Area score
         if self.seg_path is None:
             area = self.area[[i]]
-            seg = np.zeros(dsize, dtype=bool)[np.newaxis, :, :]
+            seg = np.zeros(dsize[::-1], dtype=bool)[np.newaxis, :, :]
         else:
             seg = cv2.imread(str(Path(self.seg_path) / (file.split(".")[0] + ".png")), 0)
             seg = seg[y_min : y_max + 1, x_min : x_max + 1]
@@ -173,8 +177,9 @@ class WholeBodyTestDataset(Dataset):
         img = cv2.cvtColor(np.pad(ori_img, pad_width), cv2.COLOR_BGR2RGB)
 
         # Normalize and patchify
-        patches = norm_transforms(self.transforms(torch.Tensor(patchify(np.transpose(img, (2, 0, 1)), (3, 256, 256), step=self.step)[0])) / 255)  # NyNxC3HW
-
+        patches = norm_transforms(
+            self.transforms(torch.Tensor(patchify(np.transpose(img, (2, 0, 1)), (3, 256, 256), step=self.step)[0])) / 255
+        )  # NyNxC3HW
         return {
             "patches": patches,
             "mask": mask,
@@ -206,56 +211,68 @@ class WholeBodyTrainDataset(Dataset):
     def __getitem__(self, i):
         img = norm_transforms(self.transforms(read_image(str(Path(self.img_path) / self.idx[i]))))  # N3HW
         seg = torch.zeros((img.shape[0], 4, img.shape[2], img.shape[3]), dtype=torch.int64)
-        return {"img":img, "seg":seg}
+        return {"img": img, "seg": seg}
 
     def __len__(self):
         return len(self.idx)
 
 
 class ROIDataset(Dataset):
-    def __init__(self, img_path, seg_path, class_path, transforms, idx):
+    def __init__(self, img_path, seg_path, class_path, transforms, idx, use_synthetic=False):
         """Dataset for training ROI model and whole-body model.
 
         Args:
             img_path (str): Directory path where images are stored.
             seg_path (str): Directory path where segment labelse are stored.
             class_path (str): Path where the severity class information is stored.
-            transforms : 
+            transforms :
             idx (List): List of individual image file paths.
         """
         self.transforms = transforms
         self.img_path = img_path
         self.seg_path = seg_path
         self.idx = idx
+        self.use_synthetic = use_synthetic
 
         with open(class_path, "rb") as f:
             data = pickle.load(f)
             index = list(data["index"])
         self.anno = data["annotations"][[index.index(os.path.basename(x).split(".")[0]) for x in self.idx], :4]
 
-        self.labellers = [filename for filename in os.listdir(seg_path) if os.path.isdir(os.path.join(seg_path, filename))]
+        self.labellers = ["동현", "재성"]
 
     def __getitem__(self, i):
         file = self.idx[i]
-        img = read_image(str(Path(self.img_path) / (file.split(".")[0] + ".jpg"))) # 3HW
-        grade = torch.LongTensor(self.anno[i])  # CL'
-        seg = torch.stack([read_image(
-            str(Path(self.seg_path) / l / (file.split(".")[0] + ".png")), ImageReadMode.GRAY
-        ) for l in self.labellers]) # L1HW
+        img = read_image(str(Path(self.img_path) / (file.split(".")[0] + ".jpg")))  # 3HW
+        grade = torch.LongTensor(self.anno[i]).T  # L'C
+        seg = torch.stack(
+            [read_image(str(Path(self.seg_path) / l / (file.split(".")[0] + ".png")), ImageReadMode.GRAY) for l in self.labellers]
+        )  # L1HW
 
         seg = tv_tensors.Mask(seg)
         img, seg = self.transforms(img, seg)
-        ori_img = torch.permute(torch.flip(img, dims=(0,)), dims=(1, 2, 0)) # 3(RGB)HW -> HW3(BGR)
+        ori_img = torch.permute(torch.flip(img, dims=(0,)), dims=(1, 2, 0))  # 3(RGB)HW -> HW3(BGR)
         img = norm_transforms(img)
-        seg = seg.bool()
+        seg = seg.bool().squeeze(1)  # LHW
 
-        return {"img": img, "seg": seg, "area": area2score(seg.float().mean((2,3))), "grade": grade, "ori_img": ori_img, "file_name": file.split(".")[0] + ".jpg"}
+        data = {
+            "img": img,
+            "seg": seg,
+            "area": area2score(seg.float().mean((1, 2))),
+            "grade": grade,
+            "ori_img": ori_img,
+            "file_name": file.split(".")[0] + ".jpg",
+        }
+        if self.use_synthetic:
+            data["syn"] = self.transforms(tv_tensors.Mask(np.load(str(Path("results") / "synthetic" / (file.split(".")[0] + ".npy")))))
+
+        return data
 
     def __len__(self):
         return len(self.idx)
 
 
-def get_dataset(dataset_name, split_ratio=0.2, step_size=128, wholebody=False):
+def get_dataset(dataset_name, split_ratio=0.2, step_size=128, wholebody=False, synthetic=False):
     """Return a specific dataset requested.
 
     Args:
@@ -282,12 +299,14 @@ def get_dataset(dataset_name, split_ratio=0.2, step_size=128, wholebody=False):
             "data/'19/classes/meta_result.pkl",
             roi_train_transforms if wholebody else train_transforms,
             train_idx,
+            synthetic,
         ), ROIDataset(
             "data/'19/images/Int. (SNU)",
             "data/'19/labels/Int. (SNU)",
             "data/'19/classes/meta_result.pkl",
             roi_test_transforms if wholebody else test_transforms,
             val_idx,
+            synthetic,
         )
     elif dataset_name == "wb_train":
         train_idx, val_idx = train_test_split(os.listdir("data/'20 Int. (SNU-adult)/images/NL"), test_size=split_ratio, random_state=42)
@@ -300,11 +319,15 @@ def get_dataset(dataset_name, split_ratio=0.2, step_size=128, wholebody=False):
             wholebody_test_transforms,
             val_idx,
         )
-    
+
     # Test datasets
     elif dataset_name == "19_int":
-        with open("data/'19/classes/test.txt", "r") as f:
-            test_idx = f.read().split("\n")
+        if synthetic:
+            with open("data/'19/classes/train.txt", "r") as f:
+                test_idx = f.read().split("\n")
+        else:
+            with open("data/'19/classes/test.txt", "r") as f:
+                test_idx = f.read().split("\n")
         return ROIDataset(
             "data/'19/images/Int. (SNU)",
             "data/'19/labels/Int. (SNU)",
@@ -328,29 +351,24 @@ def get_dataset(dataset_name, split_ratio=0.2, step_size=128, wholebody=False):
             test_transforms,
             os.listdir("data/'20 Int. (SNU-adult)/images/AD"),
             "data/'20 Int. (SNU-adult)/masks/AD",
-            step_size
+            step_size,
         )
     elif dataset_name == "20_ext":
         return WholeBodyTestDataset(
             "data/'20 Ext. (SNUBH-adult)/selected",
-            None, # "data/'20 Ext. (SNUBH-adult)/labels/lesion_area",
+            None,  # "data/'20 Ext. (SNUBH-adult)/labels/lesion_area",
             "data/'20 Ext. (SNUBH-adult)/classes/meta_result.pkl",
             test_transforms,
             os.listdir("data/'20 Ext. (SNUBH-adult)/selected"),
             "data/'20 Ext. (SNUBH-adult)/masks",
-            step_size
+            step_size,
         )
-    
+
     # Prediction datasets
     elif dataset_name == "roi_predict":
-        return ROIPredict(
-            "data/roi_predict"
-        )
+        return ROIPredict("data/roi_predict")
     elif dataset_name == "wb_predict":
-        return WholeBodyPredictDataset(
-            "data/wb_predict/image",
-            "data/wb_predict/mask"
-        )
+        return WholeBodyPredictDataset("data/wb_predict/image", "data/wb_predict/mask")
     else:
         raise ValueError()
 
@@ -367,10 +385,10 @@ if __name__ == "__main__":
         )
 
     weights = np.array([np.unique(dataset.anno[:, i], return_counts=True)[1] for i in range(4)])  # Cc(num_cuts+1)
-    weights[:, 0] = weights[:, 0]#  + weights.sum(1)  # whole body (divided by the number of seg labels)
+    weights[:, 0] = weights[:, 0]  #  + weights.sum(1)  # whole body (divided by the number of seg labels)
     weights = 1.0 / weights
     weights = weights / weights.sum(1, keepdims=True) * 4  # Normalize
-    weights = 0.5 * (1. + weights)
+    weights = 0.5 * (1.0 + weights)
     print("Weights for class-imbalance")
     print(weights)
 
@@ -389,7 +407,14 @@ if __name__ == "__main__":
     """
     ####### COMPUTE MEAN / STD
     image_size = 256
-    test_transforms = v2.Compose([v2.Resize((image_size, image_size), antialias=True), v2.ToDtype(torch.float32), Scale(), v2.Normalize(mean=(0,0,0), std=(1,1,1))])
+    test_transforms = v2.Compose(
+        [
+            v2.Resize((image_size, image_size), antialias=True),
+            v2.ToDtype(torch.float32),
+            Scale(),
+            v2.Normalize(mean=(0, 0, 0), std=(1, 1, 1)),
+        ]
+    )
     with open("data/'19/classes/train.txt", "r") as f:
         dataset = ROIDataset(
             "data/'19/images/Int. (SNU)",

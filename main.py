@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import torchvision
 
@@ -17,7 +17,6 @@ import numpy as np
 from datetime import datetime
 import shutil
 import pickle
-from statsmodels.stats.inter_rater import fleiss_kappa, aggregate_raters
 import scipy
 import pandas as pd
 
@@ -27,16 +26,17 @@ from utils import *
 
 
 class AtopyDataModule(pl.LightningDataModule):
-    def __init__(self, cfg, test_dataset):
+    def __init__(self, cfg, test_dataset, synthetic):
         super().__init__()
         self.cfg = cfg
         self.test_dataset = test_dataset
+        self.synthetic = synthetic
 
     def setup(self, stage):
-        self.roi_train, self.roi_val = get_dataset("roi_train", wholebody=self.cfg.train.wholebody)
+        self.roi_train, self.roi_val = get_dataset("roi_train", wholebody=self.cfg.train.wholebody, synthetic=self.synthetic)
         self.wb_train, self.wb_val = get_dataset("wb_train")
 
-        self.test = get_dataset(self.test_dataset, step_size=self.cfg.test.step)
+        self.test = get_dataset(self.test_dataset, step_size=self.cfg.test.step, synthetic=self.synthetic)
 
     def train_dataloader(self):
         if self.cfg.train.wholebody:
@@ -112,15 +112,15 @@ class AtopyDataModule(pl.LightningDataModule):
         )
 
 
-
 class LitModel(pl.LightningModule):
-    def __init__(self, model, cfg, exp_name=None):
+    def __init__(self, model, cfg, exp_name=None, synthetic=False):
         super().__init__()
 
         self.model = model
         self.cfg = cfg
         self.mc_n = cfg.test.mc_n
         self.exp_name = exp_name
+        self.synthetic = synthetic
         self.cfg.exp_date = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
         self.step = self.cfg.test.step
 
@@ -141,89 +141,17 @@ class LitModel(pl.LightningModule):
         return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
     def on_train_start(self):
+        self.phase = "train" 
         self.logger.log_hyperparams(dict(self.cfg.train))
 
     def training_step(self, batch, batch_idx):
-        if isinstance(batch, list): # Use whole-body images and ROI images jointly.
-            batch, wb_batch = batch
+        return self.forward_step(batch)
 
-            wb_img = wb_batch["img"]  # BN3HW
-            wb_seg = wb_batch["seg"]  # BNCHW
-            wb_img = torch.flatten(wb_img, 0, 1)  # (BN)3HW
-            wb_seg = torch.flatten(wb_seg, 0, 1)  # (BN)CHW
-
-            img = batch["img"]  # B3HW
-            seg = batch["seg"]  # BL1HW
-            grade = batch["grade"].swapaxes(1, 2)[:, :, None, :, None, None]  # BL'1C11
-
-            seg = seg.unsqueeze(1) * grade
-            seg = torch.flatten(seg, 0, 2)  # (BL'L)CHW
-            img = torch.flatten(img.unsqueeze(1).expand(-1, seg.shape[0] // img.shape[0], -1, -1, -1), 0, 1)
-            # Segmentation and grade labels of an image are intended to be fed into the model at the same time,
-            # to learn diverse possibilities that the image possesses.
-
-            img = torch.cat([img, wb_img])
-            seg = torch.cat([seg, wb_seg])
-
-        else: # Only ROI iamges
-            img = batch["img"]  # B3HW
-            seg = batch["seg"]  # BL1HW
-            grade = batch["grade"].swapaxes(1, 2)[:, :, None, :, None, None]  # BL'1C11
-
-            seg = seg.unsqueeze(1) * grade
-            seg = torch.flatten(seg, 0, 2)  # (BL'L)CHW
-            img = torch.flatten(img.unsqueeze(1).expand(-1, seg.shape[0] // img.shape[0], -1, -1, -1), 0, 1)
-
-        loss_dict = self.model.sum_loss(seg, img)
-        self.log_dict(
-            {"train_" + k: v for k, v in loss_dict["summaries"].items()},
-            sync_dist=True,
-            on_epoch=True,
-            on_step=False,
-            batch_size=seg.shape[0],
-        )
-
-        return loss_dict["supervised_loss"]
+    def on_validation_start(self):
+        self.phase = "val"
 
     def validation_step(self, batch, batch_idx):
-        if isinstance(batch, list): # Use whole-body images and ROI images jointly.
-            batch, wb_batch = batch
-
-            wb_img = wb_batch["img"]  # BN3HW
-            wb_seg = wb_batch["seg"]  # BNCHW
-            wb_img = torch.flatten(wb_img, 0, 1)  # (BN)3HW
-            wb_seg = torch.flatten(wb_seg, 0, 1)  # (BN)CHW
-
-            img = batch["img"]  # B3HW
-            seg = batch["seg"]  # BL1HW
-            grade = batch["grade"].swapaxes(1, 2)[:, :, None, :, None, None]  # BL'1C11
-
-            seg = seg.unsqueeze(1) * grade
-            seg = torch.flatten(seg, 0, 2)  # (BL'L)CHW
-            img = torch.flatten(img.unsqueeze(1).expand(-1, seg.shape[0] // img.shape[0], -1, -1, -1), 0, 1)
-            # Segmentation and grade labels of an image are intended to be fed into the model at the same time,
-            # to learn diverse possibilities that the image possesses.
-
-            img = torch.cat([img, wb_img])
-            seg = torch.cat([seg, wb_seg])
-
-        else: # Only ROI iamges
-            img = batch["img"]  # B3HW
-            seg = batch["seg"]  # BL1HW
-            grade = batch["grade"].swapaxes(1, 2)[:, :, None, :, None, None]  # BL'1C11
-
-            seg = seg.unsqueeze(1) * grade
-            seg = torch.flatten(seg, 0, 2)  # (BL'L)CHW
-            img = torch.flatten(img.unsqueeze(1).expand(-1, seg.shape[0] // img.shape[0], -1, -1, -1), 0, 1)
-
-        loss_dict = self.model.sum_loss(seg, img)
-        self.log_dict(
-            {"val_" + k: v for k, v in loss_dict["summaries"].items()},
-            sync_dist=True,
-            on_epoch=True,
-            on_step=False,
-            batch_size=seg.shape[0],
-        )
+        self.forward_step(batch)
 
     def on_validation_epoch_end(self) -> None:
         self.model._loss_kwargs["beta"] /= self.cfg.train.gamma
@@ -233,174 +161,78 @@ class LitModel(pl.LightningModule):
         self.logger.log_hyperparams(dict(self.cfg.test))
         self.gt_area = []
         self.gt_severity = []
-        self.gt_kappa = []
         self.gt_easi = []
         self.area = []
         self.severity = []
-        self.kappa = []
         self.easi = []
         self.file_names = []
+        self.ged = []
 
     def test_step(self, batch, batch_idx):
         # Load batch
         seg = batch["seg"]  # BLHW
-        gt_area = batch["area"]  # BL1
-        grade = batch["grade"]  # BCL'
+        gt_area = batch["area"]  # BL
+        grade = batch["grade"]  # BL'C
         ori_img = batch["ori_img"].cpu().numpy()
         file_name = batch["file_name"]
         self.file_names.extend(file_name)
         num_classes = self.cfg.model.num_cuts + 1
 
+        B, _, H, W = seg.shape
+        C = grade.shape[-1]
+
         # Ground Truth
-        gt_area = batch["area"].transpose(0, 1).cpu().numpy()  # LB1
-        gt_severity = grade.permute(2, 0, 1).cpu().numpy()  # L'BC
+        gt_easi = (gt_area[:, :, None, None] * grade[:, None, :, :]).reshape(B, -1, C).cpu().numpy()  # BNC
+        gt_area = gt_area.squeeze(-1).cpu().numpy()  # BL
+        gt_severity = grade.cpu().numpy()  # BL'C
 
-        if "img" in batch.keys(): # Only ROI images
+        gt = (seg.reshape((B, -1, 1, 1, H, W)) * grade.reshape((B, 1, -1, C, 1, 1))).reshape((B, -1, C, H, W))  # BNCHW
 
-            # Calculate kappa of the ground truth
-            area4k = seg.flatten(2).transpose(0, 1).cpu().numpy()  # LB(HW)
-            gt_kappa = np.nan_to_num(
-                np.array([fleiss_kappa(aggregate_raters(area4k[:, i].T)[0]) for i in range(area4k.shape[1])]),
-                nan=1.0,
-            )  # Complete agreement when k = 1
-            preds = self.model.sample(batch["img"], self.mc_n).argmax(-1)  # NBCHW
+        # Prediction
+        if "img" in batch.keys():  # Only ROI images
+            area, severity, easi, preds = self.inference_patch(batch)
 
-            # Prediction; area and severity scores
-            area = (preds.sum(2) > 1).reshape(preds.shape[:2] + (-1,)).cpu().numpy()  # NB(HW)
-            kappa = np.nan_to_num(
-                np.array([fleiss_kappa(aggregate_raters(area[:, i].T)[0]) for i in range(area.shape[1])]),
-                nan=1.0,
-            )
-            area = area.astype(np.float32).mean(-1, keepdims=True)  # NB1
-            mean_area = area.mean(0)
-            severity = preds.float().mean((3, 4)).cpu().numpy() / mean_area  # NBC
-            severity = 0.5 * (severity + severity.mean(2, keepdims=True))
-            easi = area2score(mean_area) * severity  # NBC
-            area = area.squeeze(-1)  # NB
+            self.ged.append(generalized_energy_distance(gt, preds))
 
-            preds = F.one_hot(preds, num_classes=num_classes).float().mean(0).cpu().numpy()  # BCHW4
+            if self.synthetic == True:
+                dSY = torch.zeros(B, self.mc_n).to(gt.device)
+                for i in range(gt.shape[1]):
+                    for j in range(self.mc_n):
+                        dSY[:, j] += (gt[:, i] - preds[:, j]).float().abs().mean((1, 2, 3))
+                topks = preds[:, torch.topk(dSY, k=self.cfg.test.topk, dim=-1, largest=False)[1]].cpu().numpy()  # BkCHW
+                for i, topk in enumerate(topks):
+                    np.save(f"results/synthetic/{file_name[i].split('.')[0] + '.npy'}", topk)
+                return
 
+            preds = F.one_hot(preds, num_classes=num_classes).float().mean(1).cpu().numpy()  # BCHW4
         elif "patches" in batch.keys():
-            gt_kappa = np.array([1.0])
-            assert self.cfg.test.batch_size == 1
-
-            # Load Batch
-            patches = batch["patches"][0]  # NyNx3HW
-            mask = batch["mask"][0]  # 1HW
-            pad = batch["pad_width"][0]
-
-            # Inference with patch batch
-            nx = patches.shape[1]
-            preds = torch.zeros(
-                (
-                    8,
-                    self.cfg.model.num_classes,
-                    (patches.shape[0] - 1) * self.step + 256,
-                    (patches.shape[1] - 1) * self.step + 256,
-                    num_classes,
-                ),
-                dtype=torch.float,
-            ).to(
-                patches.device
-            )  # NCHW
-
-            window = self.window.to(patches.device)
-            norm = torch.zeros_like(preds).to(patches.device)
-            patches = patches.reshape((-1,) + patches.shape[2:])  # N3HW
-
-            N = patches.shape[0]
-            bs = self.cfg.test.max_num_patches
-
-            # Do an inference step with 8 different orientiations to reduce possible variablity
-            cnt = 0
-            for rot in range(4):
-                for flip in [True, False]:
-                    img = torch.rot90(patches, rot, dims=(2, 3))
-                    if flip:
-                        img = torch.flip(img, dims=(3,))
-                    for i in range(0, N, bs):
-                        end = min(i + bs, N)
-                        pred = self.model.sample(img[i:end], 1, mean=True)[0]
-
-                        if flip:
-                            pred = torch.flip(pred, dims=(3,))
-                        pred = torch.rot90(pred, -rot, dims=(2, 3)) * window
-
-                        # Add patch prediction
-                        for j in range(end - i):
-                            y = (i + j) // nx * self.step
-                            x = (i + j) % nx * self.step
-                            preds[cnt, :, y : y + 256, x : x + 256] += pred[j]
-                            norm[cnt, :, y : y + 256, x : x + 256] += window
-
-                    cnt += 1
-
-            preds = preds / norm  # NCHW4
-
-            # Unpad
-            preds = (preds[:, :, pad[0, 0] : -pad[0, 1], pad[1, 0] : -pad[1, 1]] * mask.unsqueeze(-1)).argmax(-1)
-
-            # Prediction; area and severity scores
-            area = (
-                (preds.reshape(preds.shape[:2] + (-1,))[:, :, mask.flatten().bool()].sum(1, keepdims=True) > 1)
-                .float()
-                .mean(-1)
-                .cpu()
-                .numpy()
-            )  # N1
-            kappa = np.array([1.0])
-            mean_area = area.mean(0, keepdims=True)
-            severity = np.nan_to_num(
-                preds.reshape(preds.shape[:2] + (-1,))[:, :, mask.flatten().bool()].float().mean(-1).cpu().numpy() / mean_area
-            )  # NC
-            severity = 0.5 * (severity + severity.mean(1, keepdims=True))
-            easi = (area2score(mean_area) * severity)[:, np.newaxis, :]  # N1C
-            severity = severity[:, np.newaxis, :]  # N1C
-            preds = F.one_hot(preds, num_classes=num_classes).float().mean(0, keepdims=True).cpu().numpy()  # BCHW4
-
+            area, severity, easi, preds = self.inference_wholebody(batch, num_classes)
+            preds = F.one_hot(preds, num_classes=num_classes).float().mean(0, keepdim=True).cpu().numpy()  # NCHW4
+            self.ged.append(np.zeros(B))
         else:
             raise ValueError
-
-        gt_easi = (gt_area[np.newaxis, ...] * gt_severity[:, np.newaxis, :, :]).reshape((-1,) + gt_severity.shape[1:])  # NBC
-        gt_area = gt_area.squeeze(-1)  # NB
-
-        area = area2score(area)
-        severity = severity * area[:, :, np.newaxis].astype(bool)  # NBC
+        gt = F.one_hot(gt, num_classes=num_classes).float().mean(1).cpu().numpy()  # BCHW4
 
         # Gather results
         self.gt_area.append(gt_area)
         self.gt_severity.append(gt_severity)
-        self.gt_kappa.append(gt_kappa)
         self.gt_easi.append(gt_easi)
         self.area.append(area)
         self.severity.append(np.nan_to_num(severity))
-        self.kappa.append(kappa)
         self.easi.append(easi)
 
-        # visualization
-        B, C, H, W = preds.shape[:-1]
-        gt = (
-            F.one_hot(
-                seg.reshape((B, 1, 1, -1, H, W)) * grade.reshape((B, C, -1, 1, 1, 1)),
-                num_classes=num_classes,
-            )
-            .float()
-            .mean((2, 3))
-            .cpu()
-            .numpy()
-        )  # BCHW4
-
-        # Add mean of gt and preds
+        # Add mean of gt and preds by class
         gt = np.concatenate([gt, gt.mean(1, keepdims=True)], axis=1)
         preds = np.concatenate([preds, preds.mean(1, keepdims=True)], axis=1)
 
+        # Visualization
         font_size = max(H // 256, 1)
         for i in range(B):
             resized_ori = cv2.resize(ori_img[i], (W, H))
 
             # Pred summary
             pred_img = self.vis_pred(resized_ori, preds[i])
-            text = self.write_summary(area[:, i], severity[:, i])
+            text = self.write_summary(area[i], severity[i], easi[i])
             for j, t in enumerate(text):
                 cv2.putText(
                     pred_img,
@@ -415,45 +247,34 @@ class LitModel(pl.LightningModule):
 
             # GT summary
             gt_img = self.vis_gt(resized_ori, gt[i])
-            text = self.write_summary(gt_area[:, i], gt_severity[:, i])
+            text = self.write_summary(gt_area[i], gt_severity[i], gt_easi[i])
             for j, t in enumerate(text):
                 cv2.putText(
-                    gt_img,
-                    t,
-                    (10, 25 * (j + 1) * font_size),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    font_size / 2,
-                    (255, 90, 0),
-                    font_size,
-                    cv2.LINE_AA,
+                    gt_img, t, (10, 25 * (j + 1) * font_size), cv2.FONT_HERSHEY_SIMPLEX, font_size / 2, (255, 90, 0), font_size, cv2.LINE_AA
                 )
 
             # Concatenate prediction and GT and save it.
-            cv2.imwrite(
-                f"results/{self.exp_name}/{file_name[i]}",
-                np.concatenate((pred_img, gt_img), axis=0),
-            )
+            cv2.imwrite(f"results/{self.exp_name}/{file_name[i]}", np.concatenate((pred_img, gt_img), axis=0))
 
     def on_test_end(self):
         # Write results
-        self.easi = np.concatenate(self.easi, axis=1)  # NBC
+        self.easi = np.concatenate(self.easi)  # BNC
         with open(f"results/{self.exp_name}/results.pkl", "wb") as f:
             pickle.dump(
                 {
-                    "gt_area": np.concatenate(self.gt_area, axis=1),  # NB
-                    "gt_severity": np.concatenate(self.gt_severity, axis=1),  # NBC
-                    "gt_kappa": np.concatenate(self.gt_kappa),  # B
-                    "gt_easi": np.concatenate(self.gt_easi, axis=1),  # NBC
-                    "area": np.concatenate(self.area, axis=1),  # NB
-                    "severity": np.concatenate(self.severity, axis=1),  # NBC
-                    "kappa": np.concatenate(self.kappa),  # B
+                    "gt_area": np.concatenate(self.gt_area),  # BN
+                    "gt_severity": np.concatenate(self.gt_severity),  # BNC
+                    "gt_easi": np.concatenate(self.gt_easi),  # BNC
+                    "area": np.concatenate(self.area),  # BN
+                    "severity": np.concatenate(self.severity),  # BNC
                     "easi": self.easi,
+                    "ged": np.array(self.ged),  # B
                 },
                 f,
             )
 
         pd.DataFrame(
-            self.easi.mean(0), columns=["Erythema", "Edema/Papulation", "Excoriation", "Lichenification"], index=self.file_names
+            self.easi.mean(1), columns=["Erythema", "Edema/Papulation", "Excoriation", "Lichenification"], index=self.file_names
         ).to_excel(f"results/{self.exp_name}/easi.xlsx")
 
     def predict_step(self, batch, batch_idx):
@@ -462,106 +283,13 @@ class LitModel(pl.LightningModule):
         file_name = batch["file_name"][0]
         num_classes = self.cfg.model.num_cuts + 1
 
+        # Prediction
         if not self.cfg.test.wholebody:
-            preds = self.model.sample(batch["img"], self.mc_n).argmax(-1)  # NBCHW
-
-            # Prediction; area and severity scores
-            area = (preds.sum(2) > 1).reshape(preds.shape[:2] + (-1,)).cpu().numpy()  # NB(HW)
-            kappa = np.nan_to_num(
-                np.array([fleiss_kappa(aggregate_raters(area[:, i].T)[0]) for i in range(area.shape[1])]),
-                nan=1.0,
-            )
-            area = area.astype(np.float32).mean(-1, keepdims=True)  # NB1
-            mean_area = area.mean(0)
-            severity = preds.float().mean((3, 4)).cpu().numpy() / mean_area  # NBC
-            severity = 0.5 * (severity + severity.mean(2, keepdims=True))
-            easi = area2score(mean_area) * severity  # NBC
-            area = area.squeeze(-1)  # NB
-
-            preds = F.one_hot(preds, num_classes=num_classes).float().cpu().numpy()[:, 0] # NCHW4
-            # preds = preds.mean(0)
-
+            area, severity, easi, preds = self.inference_patch(batch)
+            preds = F.one_hot(preds, num_classes=num_classes).float()[0].cpu().numpy()  # NCHW4
         else:
-            assert self.cfg.test.batch_size == 1
-
-            # Load Batch
-            patches = batch["patches"][0]  # NyNx3HW
-            mask = batch["mask"][0] # 1HW
-            pad = batch["pad_width"][0]
-
-            # Inference with patch batch
-            nx = patches.shape[1]
-            preds = torch.zeros(
-                (
-                    8,
-                    self.cfg.model.num_classes,
-                    (patches.shape[0] - 1) * self.step + 256,
-                    (patches.shape[1] - 1) * self.step + 256,
-                    num_classes,
-                ),
-                dtype=torch.float,
-            ).to(
-                patches.device
-            )  # NCHW
-
-            window = self.window.to(patches.device)
-            norm = torch.zeros_like(preds).to(patches.device)
-            patches = patches.reshape((-1,) + patches.shape[2:])  # N3HW
-
-            N = patches.shape[0]
-            bs = self.cfg.test.max_num_patches
-
-            # Do an inference step with 8 different orientiations to reduce possible variablity
-            cnt = 0
-            for rot in range(4):
-                for flip in [True, False]:
-                    img = torch.rot90(patches, rot, dims=(2, 3))
-                    if flip:
-                        img = torch.flip(img, dims=(3,))
-                    for i in range(0, N, bs):
-                        end = min(i + bs, N)
-                        pred = self.model.sample(img[i:end], 1, mean=True)[0]
-
-                        if flip:
-                            pred = torch.flip(pred, dims=(3,))
-                        pred = torch.rot90(pred, -rot, dims=(2, 3)) * window
-
-                        for j in range(end - i):
-                            y = (i + j) // nx * self.step
-                            x = (i + j) % nx * self.step
-                            preds[cnt, :, y : y + 256, x : x + 256] += pred[j]
-                            norm[cnt, :, y : y + 256, x : x + 256] += window
-
-                    cnt += 1
-
-            preds = preds / norm  # NCHW4
-
-            # Unpad
-            preds = (preds[:, :, pad[0, 0] : -pad[0, 1], pad[1, 0] : -pad[1, 1]] * mask.unsqueeze(-1)).argmax(-1)
-
-            # Prediction; area and severity scores
-            area = (
-                (preds.reshape(preds.shape[:2] + (-1,))[:, :, mask.flatten().bool()].sum(1, keepdims=True) > 1)
-                .float()
-                .mean(-1)
-                .cpu()
-                .numpy()
-            )  # N1
-            kappa = np.array([1.0])
-            mean_area = area.mean(0, keepdims=True)
-            severity = np.nan_to_num(
-                preds.reshape(preds.shape[:2] + (-1,))[:, :, mask.flatten().bool()].float().mean(-1).cpu().numpy() / mean_area
-            )  # NC
-            severity = 0.5 * (severity + severity.mean(1, keepdims=True))
-            easi = (area2score(mean_area) * severity)[:, np.newaxis, :]  # N1C
-            severity = severity[:, np.newaxis, :]  # N1C
+            area, severity, easi, preds = self.inference_wholebody(batch, num_classes)
             preds = F.one_hot(preds, num_classes=num_classes).float().cpu().numpy()  # NCHW4
-
-        area = area2score(area)
-        severity = severity * area[:, :, np.newaxis].astype(bool)  # NBC
-
-        # Gather results
-        severity = np.nan_to_num(severity)
 
         # visualization
         N, C, H, W = preds.shape[:-1]
@@ -572,47 +300,128 @@ class LitModel(pl.LightningModule):
         for i in range(N):
             hm_img = heatmap(cv2.resize(ori_img, (W, H)), preds[i])
             for j, sign in enumerate(["e", "i", "ex", "l", "mean"]):
-                cv2.imwrite(
-                    f"figure/images/{file_name.split('.')[0]}_{sign}_{i}.jpg",
-                    hm_img[j]
-                )
+                cv2.imwrite(f"figure/images/{file_name.split('.')[0]}_{sign}_{i}.jpg", hm_img[j])
 
+    def forward_step(self, batch):
+        if isinstance(batch, list):  # Use whole-body images and ROI images jointly.
+            batch, wb_batch = batch
+
+            wb_img = wb_batch["img"]  # BN3HW
+            wb_seg = wb_batch["seg"]  # BNHW
+            wb_img = torch.flatten(wb_img, 0, 1)  # (BN)3HW
+            wb_seg = torch.flatten(wb_seg, 0, 1)  # (BN)HW
+
+        img = batch["img"]  # B3HW
+        seg = batch["seg"][:, None, :, None, :, :]  # B1L1HW
+        grade = batch["grade"][:, :, None, :, None, None]  # BL'1C11
+
+        seg = torch.flatten(seg * grade, 0, 2)  # (BN)CHW
+        if "syn" in batch.keys():
+            seg = torch.cat([seg, batch["syn"].flatten(0, 1)])  # (BN')CHW
+        img = torch.flatten(img.unsqueeze(1).expand(-1, seg.shape[0] // img.shape[0], -1, -1, -1), 0, 1)  # BN3HW
+
+        # Segmentation and grade labels of an image are intended to be fed into the model at the same time,
+        # to learn diverse possibilities that the image possesses.
+        if isinstance(batch, list):
+            img = torch.cat([img, wb_img])
+            seg = torch.cat([seg, wb_seg])
+
+        loss_dict = self.model.sum_loss(seg, img)
+        self.log_dict(
+            {f"{self.phase}_" + k: v for k, v in loss_dict["summaries"].items()},
+            sync_dist=True,
+            on_epoch=True,
+            on_step=False,
+            batch_size=seg.shape[0],
+        )
+        return loss_dict["supervised_loss"]
+
+    def inference_patch(self, batch):
+        preds = self.model.sample(batch["img"], self.mc_n).argmax(-1)  # BNCHW
+        area, severity, easi = cal_EASI(preds.flatten(3, 4))
+        return area, severity, easi, preds
+
+    def inference_wholebody(self, batch, num_classes):
+        assert self.cfg.test.batch_size == 1
+        # Load Batch
+        patches = batch["patches"][0]  # NyNx3HW
+        mask = batch["mask"][0]  # 1HW
+        pad = batch["pad_width"][0]
+
+        # Inference with patch batch
+        nx = patches.shape[1]
+        preds = torch.zeros(
+            (
+                8,
+                self.cfg.model.num_classes,
+                (patches.shape[0] - 1) * self.step + 256,
+                (patches.shape[1] - 1) * self.step + 256,
+                num_classes,
+            ),
+            dtype=torch.float,
+        ).to(
+            patches.device
+        )  # NCHW
+
+        window = self.window.to(patches.device)
+        norm = torch.zeros_like(preds).to(patches.device)
+        patches = patches.reshape((-1,) + patches.shape[2:])  # N3HW
+
+        N = patches.shape[0]
+        bs = self.cfg.test.max_num_patches
+
+        # Do an inference step with 8 different orientiations to reduce possible variablity
+        cnt = 0
+        for rot in range(4):
+            for flip in [True, False]:
+                img = torch.rot90(patches, rot, dims=(2, 3))
+                if flip:
+                    img = torch.flip(img, dims=(3,))
+                for i in range(0, N, bs):
+                    end = min(i + bs, N)
+                    pred = self.model.sample(img[i:end], 1, mean=True).squeeze(1)  # BCHW4
+
+                    if flip:
+                        pred = torch.flip(pred, dims=(3,))
+                    pred = torch.rot90(pred, -rot, dims=(2, 3)) * window
+
+                    # Add patch prediction
+                    for j in range(end - i):
+                        y = (i + j) // nx * self.step
+                        x = (i + j) % nx * self.step
+                        preds[cnt, :, y : y + 256, x : x + 256] += pred[j]
+                        norm[cnt, :, y : y + 256, x : x + 256] += window
+
+                cnt += 1
+
+        preds = preds / norm  # NCHW4
+
+        # Unpad
+        preds = (preds[:, :, pad[0, 0] : -pad[0, 1], pad[1, 0] : -pad[1, 1]] * mask.unsqueeze(-1)).argmax(-1)  # NCHW
+
+        # Prediction; area and severity scores
+        area, severity, easi = cal_EASI(preds.reshape(preds.shape[:2] + (-1,))[:, :, mask.flatten().bool()].unsqueeze(0))
+        return area, severity, easi, preds
 
     def vis_gt(self, img, gt):
         return np.concatenate(
             (
                 np.ones_like(img) * 255,
-                np.swapaxes(
-                    np.swapaxes(heatmap(img, gt), 1, 2).reshape(-1, img.shape[0], 3),
-                    0,
-                    1,
-                ),
+                np.swapaxes(np.swapaxes(heatmap(img, gt), 1, 2).reshape(-1, img.shape[0], 3), 0, 1),
             ),
             axis=1,
         )
 
     def vis_pred(self, img, pred):
         return np.concatenate(
-            (
-                img,
-                np.swapaxes(
-                    np.swapaxes(heatmap(img, pred), 1, 2).reshape(-1, img.shape[0], 3),
-                    0,
-                    1
-                )
-            ),
+            (img, np.swapaxes(np.swapaxes(heatmap(img, pred), 1, 2).reshape(-1, img.shape[0], 3), 0, 1)),
             axis=1,
         )
 
-    def write_summary(self, area, severity):
-        (
-            area_mean,
-            area_std,
-            severity_mean,
-            severity_std,
-            EASI_mean,
-            EASI_std
-        ) = cal_EASI(area, severity)
+    def write_summary(self, area, severity, easi):
+        area_mean, area_std = area.mean(), area.std()
+        severity_mean, severity_std = severity.mean(0), severity.std(0)
+        easi_mean, easi_std = easi.mean(), easi.std()
         severity_lower_bound = np.clip(severity_mean - severity_std, 0, 3)
         severity_upper_bound = np.clip(severity_mean + severity_std, 0, 3)
         return [
@@ -621,7 +430,7 @@ class LitModel(pl.LightningModule):
             f"Induration : {severity_lower_bound[1]:.2f} - {severity_upper_bound[1]:.2f}",
             f"Excoriation : {severity_lower_bound[2]:.2f} - {severity_upper_bound[2]:.2f}",
             f"Lichenification : {severity_lower_bound[3]:.2f} - {severity_upper_bound[3]:.2f}",
-            f"EASI : {max(EASI_mean-EASI_std, 0):.2f} - {min(EASI_mean+EASI_std, 72):.2f}",
+            f"EASI : {max(easi_mean-easi_std, 0):.2f} - {min(easi_mean+easi_std, 72):.2f}",
         ]
 
 
@@ -638,12 +447,13 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str, help="Path to checkpoint")
     parser.add_argument("--cfg", type=str, default="config.yaml")
     parser.add_argument("--test-dataset", type=str, default="19_int")
+    parser.add_argument("--synthetic", action="store_true", help="Use/make synthetic data")
     args = parser.parse_args()
     cfg = load_config(args.cfg)
     cfg.test.wholebody = True if args.test_dataset in ["20_int", "20_ext", "wb_predict"] else False
 
     # dataset
-    atopy = AtopyDataModule(cfg, args.test_dataset)
+    atopy = AtopyDataModule(cfg, args.test_dataset, args.synthetic)
 
     # model
     model = HierarchicalProbUNet(
@@ -656,9 +466,11 @@ if __name__ == "__main__":
     )
 
     if args.checkpoint:
-        litmodel = LitModel.load_from_checkpoint(args.checkpoint, model=model, cfg=cfg, map_location=lambda storage, loc: storage.cuda(1))
+        litmodel = LitModel.load_from_checkpoint(
+            args.checkpoint, synthetic=args.synthetic, model=model, cfg=cfg, map_location=lambda storage, loc: storage.cuda(1)
+        )
     else:
-        litmodel = LitModel(model, cfg=cfg)
+        litmodel = LitModel(model, synthetic=args.synthetic, cfg=cfg)
 
     # train
     if args.phase == "train":
