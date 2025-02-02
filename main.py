@@ -1,9 +1,7 @@
 import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
-import torchvision
 
-torchvision.disable_beta_transforms_warning()
 torch.manual_seed(42)
 
 import lightning.pytorch as pl
@@ -17,7 +15,7 @@ import numpy as np
 from datetime import datetime
 import shutil
 import pickle
-import scipy
+import scipy.signal
 import pandas as pd
 
 from loader import get_dataset
@@ -34,7 +32,10 @@ class AtopyDataModule(pl.LightningDataModule):
 
     def setup(self, stage):
         self.roi_train, self.roi_val = get_dataset("roi_train", wholebody=self.cfg.train.wholebody, synthetic=self.synthetic)
-        self.wb_train, self.wb_val = get_dataset("wb_train")
+        if self.cfg.train.wholebody:
+            self.wb_train, self.wb_val = get_dataset("wb_train")
+        else:
+            self.wb_train, self.wb_val = None, None
 
         self.test = get_dataset(self.test_dataset, step_size=self.cfg.test.step, synthetic=self.synthetic)
 
@@ -141,20 +142,16 @@ class LitModel(pl.LightningModule):
         return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
     def on_train_start(self):
-        self.phase = "train" 
+        """
+        This method is called at the beginning of the training process.
+        It logs the hyperparameters used for training.
+        """
         self.logger.log_hyperparams(dict(self.cfg.train))
 
     def training_step(self, batch, batch_idx):
-        return self.forward_step(batch)
-
-    def on_validation_start(self):
-        self.phase = "val"
-
+        return self.forward_step("train", batch)
     def validation_step(self, batch, batch_idx):
-        self.forward_step(batch)
-
-    def on_validation_epoch_end(self) -> None:
-        self.model._loss_kwargs["beta"] /= self.cfg.train.gamma
+        self.forward_step("val", batch)
 
     def on_test_start(self):
         # Results to be saved
@@ -199,9 +196,9 @@ class LitModel(pl.LightningModule):
                 for i in range(gt.shape[1]):
                     for j in range(self.mc_n):
                         dSY[:, j] += (gt[:, i] - preds[:, j]).float().abs().mean((1, 2, 3))
-                topks = preds[:, torch.topk(dSY, k=self.cfg.test.topk, dim=-1, largest=False)[1]].cpu().numpy()  # BkCHW
-                for i, topk in enumerate(topks):
-                    np.save(f"results/synthetic/{file_name[i].split('.')[0] + '.npy'}", topk)
+                topks = torch.topk(dSY, k=self.cfg.test.topk, dim=-1, largest=False)[1]  # Bk
+                for i in range(preds.shape[0]):
+                    np.save(f"results/synthetic/{file_name[i].split('.')[0] + '.npy'}", preds[i, topks[i]].cpu().numpy())
                 return
 
             preds = F.one_hot(preds, num_classes=num_classes).float().mean(1).cpu().numpy()  # BCHW4
@@ -268,7 +265,7 @@ class LitModel(pl.LightningModule):
                     "area": np.concatenate(self.area),  # BN
                     "severity": np.concatenate(self.severity),  # BNC
                     "easi": self.easi,
-                    "ged": np.array(self.ged),  # B
+                    "ged": np.concatenate(self.ged),  # B
                 },
                 f,
             )
@@ -302,7 +299,7 @@ class LitModel(pl.LightningModule):
             for j, sign in enumerate(["e", "i", "ex", "l", "mean"]):
                 cv2.imwrite(f"figure/images/{file_name.split('.')[0]}_{sign}_{i}.jpg", hm_img[j])
 
-    def forward_step(self, batch):
+    def forward_step(self, phase, batch):
         if isinstance(batch, list):  # Use whole-body images and ROI images jointly.
             batch, wb_batch = batch
 
@@ -315,10 +312,11 @@ class LitModel(pl.LightningModule):
         seg = batch["seg"][:, None, :, None, :, :]  # B1L1HW
         grade = batch["grade"][:, :, None, :, None, None]  # BL'1C11
 
-        seg = torch.flatten(seg * grade, 0, 2)  # (BN)CHW
+        seg = torch.flatten(seg * grade, 1, 2)  # BNCHW
         if "syn" in batch.keys():
-            seg = torch.cat([seg, batch["syn"].flatten(0, 1)])  # (BN')CHW
-        img = torch.flatten(img.unsqueeze(1).expand(-1, seg.shape[0] // img.shape[0], -1, -1, -1), 0, 1)  # BN3HW
+            seg = torch.cat([seg, batch["syn"]], axis=1)  # BN'CHW
+        img = torch.flatten(img.unsqueeze(1).expand(-1, seg.shape[1], -1, -1, -1), 0, 1)  # (BN)3HW
+        seg = torch.flatten(seg, 0, 1)  # (BN)CHW
 
         # Segmentation and grade labels of an image are intended to be fed into the model at the same time,
         # to learn diverse possibilities that the image possesses.
@@ -328,7 +326,7 @@ class LitModel(pl.LightningModule):
 
         loss_dict = self.model.sum_loss(seg, img)
         self.log_dict(
-            {f"{self.phase}_" + k: v for k, v in loss_dict["summaries"].items()},
+            {f"{phase}_" + k: v for k, v in loss_dict["summaries"].items()},
             sync_dist=True,
             on_epoch=True,
             on_step=False,
@@ -337,11 +335,44 @@ class LitModel(pl.LightningModule):
         return loss_dict["supervised_loss"]
 
     def inference_patch(self, batch):
+        """
+        Perform inference on a batch of patches.
+
+        Args:
+            batch (dict): A dictionary containing the input data for the model. 
+                          It should have the key "img" for the input images.
+                          - "img" (torch.Tensor): Tensor of shape (B, 3, H, W) representing the input images.
+
+        Returns:
+            tuple: A tuple containing the following elements:
+                - area (torch.Tensor): Tensor of shape (B, L) representing the area scores.
+                - severity (torch.Tensor): Tensor of shape (B, L, C) representing the severity scores.
+                - easi (torch.Tensor): Tensor of shape (B, L, C) representing the EASI scores.
+                - preds (torch.Tensor): Tensor of shape (B, N, C, H, W) representing the predictions.
+        """
         preds = self.model.sample(batch["img"], self.mc_n).argmax(-1)  # BNCHW
         area, severity, easi = cal_EASI(preds.flatten(3, 4))
         return area, severity, easi, preds
 
     def inference_wholebody(self, batch, num_classes):
+        """
+        Perform inference on a batch of whole-body images.
+
+        Args:
+            batch (dict): A dictionary containing the input data for the model. 
+                          It should have the keys "patches", "mask", and "pad_width".
+                          - "patches" (torch.Tensor): Shape (Ny, Nx, 3, H, W) where Ny and Nx are the number of patches in y and x directions.
+                          - "mask" (torch.Tensor): Shape (1, H, W) where H and W are the height and width of the whole-body image.
+                          - "pad_width" (torch.Tensor): Shape (2, 2) containing the padding widths for height and width dimensions.
+            num_classes (int): The number of classes for segmentation.
+
+        Returns:
+            tuple: A tuple containing the area, severity, EASI scores, and predictions.
+                   - area (torch.Tensor): Shape (1, N) where N is the number of patches.
+                   - severity (torch.Tensor): Shape (1, N, C) where C is the number of classes.
+                   - easi (torch.Tensor): Shape (1, N, C) where C is the number of classes.
+                   - preds (torch.Tensor): Shape (N, C, H, W) where N is the number of patches, C is the number of classes, and H, W are the height and width of the whole-body image.
+        """
         assert self.cfg.test.batch_size == 1
         # Load Batch
         patches = batch["patches"][0]  # NyNx3HW
@@ -385,7 +416,6 @@ class LitModel(pl.LightningModule):
                         pred = torch.flip(pred, dims=(3,))
                     pred = torch.rot90(pred, -rot, dims=(2, 3)) * window
 
-                    # Add patch prediction
                     for j in range(end - i):
                         y = (i + j) // nx * self.step
                         x = (i + j) % nx * self.step
@@ -419,6 +449,17 @@ class LitModel(pl.LightningModule):
         )
 
     def write_summary(self, area, severity, easi):
+        """
+        Generate a summary of the area, severity, and EASI scores.
+
+        Args:
+            area (numpy.ndarray): Array of area scores.
+            severity (numpy.ndarray): Array of severity scores.
+            easi (numpy.ndarray): Array of EASI scores.
+
+        Returns:
+            list: A list of strings summarizing the area, severity, and EASI scores.
+        """
         area_mean, area_std = area.mean(), area.std()
         severity_mean, severity_std = severity.mean(0), severity.std(0)
         easi_mean, easi_std = easi.mean(), easi.std()
@@ -439,6 +480,7 @@ if __name__ == "__main__":
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
     torch.set_float32_matmul_precision("high")
+    torch.backends.cudnn.enabled = False   # The input data is not of contiguous type
 
     # arguments
     parser = ArgumentParser()
@@ -463,11 +505,12 @@ if __name__ == "__main__":
         loss_kwargs=dict(cfg.train.loss_kwargs),
         num_cuts=cfg.model.num_cuts,
         weights=cfg.model.weights,
+        imbalance=cfg.model.imbalance
     )
 
     if args.checkpoint:
         litmodel = LitModel.load_from_checkpoint(
-            args.checkpoint, synthetic=args.synthetic, model=model, cfg=cfg, map_location=lambda storage, loc: storage.cuda(1)
+            args.checkpoint, synthetic=args.synthetic, model=model, cfg=cfg, map_location=lambda storage, loc: storage.cuda()
         )
     else:
         litmodel = LitModel(model, synthetic=args.synthetic, cfg=cfg)
@@ -480,7 +523,7 @@ if __name__ == "__main__":
             max_epochs=cfg.train.max_epochs,
             devices=args.devices,
             accelerator="gpu",
-            strategy="ddp_find_unused_parameters_true",
+            strategy="ddp",
             callbacks=[checkpoint_callback, lr_monitor],
             check_val_every_n_epoch=1,
             log_every_n_steps=1,
@@ -493,6 +536,8 @@ if __name__ == "__main__":
         trainer = pl.Trainer(devices=[args.devices])
         if args.phase == "test":
             litmodel.exp_name = args.test_dataset
+            if cfg.test.wholebody:
+                cfg.test.batch_size = 1
             os.makedirs("results/" + args.test_dataset, exist_ok=True)
             trainer.test(litmodel, datamodule=atopy)
         else:

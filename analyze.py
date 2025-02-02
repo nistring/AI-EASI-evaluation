@@ -7,9 +7,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.stats import pearsonr, spearmanr
 
-robust = False
-
 if __name__ == "__main__":
+    robust = True
     # arguments
     parser = ArgumentParser()
     parser.add_argument("--exp-name", type=str, required=True)
@@ -29,12 +28,12 @@ if __name__ == "__main__":
     lm = sns.regplot(data=df, x="True", y="Pred.", scatter_kws={"alpha":0.5}, robust=robust, x_jitter=0.1)
     lm.set(xlim=(-0.1, 6.1), ylim=(-0.1, 6.1))
     lm.set(xlabel="True area score", ylabel="Predicted area score", title='')
-    # lm.set(title=f"PCC of {args.exp_name}'s area")
+    lm.set(title=f"PCC of {args.exp_name}'s area")
     lm.axes.axline((0, 0), slope=1.0, ls="--", color="black", alpha=0.5)
 
     r, p = pearsonr(gt_area, area, alternative="greater")
-    # lm.text(0.1, 5.0, "r = {:.3f}, p = {:.3e}".format(r, p))
-    # lm.text(0.1, 4.0, "Mean avg err = {:.3f}".format(np.mean(np.abs(gt_area - area))))
+    lm.text(0.1, 5.0, "r = {:.3f}, p = {:.3e}".format(r, p))
+    lm.text(0.1, 4.0, "Mean avg err = {:.3f}".format(np.mean(np.abs(gt_area - area))))
     plt.tight_layout()
     plt.savefig(f"figure/{args.exp_name}/{args.exp_name}_area.png")
     plt.clf()
@@ -46,11 +45,11 @@ if __name__ == "__main__":
     lm = sns.regplot(data=df, x="True", y="Pred.", scatter_kws={"alpha":0.5}, robust=robust)
     lm.set(xlim=(-1., 73.), ylim=(-1., 73.))
     lm.set(xlabel="True EASI score", ylabel="Predicted EASI score", title='')
-    # lm.set(title=f"PCC of {args.exp_name}'s EASI score")
+    lm.set(title=f"PCC of {args.exp_name}'s EASI score")
     lm.axes.axline((0, 0), slope=1.0, ls="--", color="black", alpha=0.5)
     r, p = pearsonr(gt_easi, easi, alternative="greater")
-    # lm.text(5, 65, "r = {:.3f}, p = {:.3e}".format(r, p))
-    # lm.text(5, 55, "Mean avg err = {:.3f}".format(np.mean(np.abs(gt_easi - easi))))
+    lm.text(5, 65, "r = {:.3f}, p = {:.3e}".format(r, p))
+    lm.text(5, 55, "Mean avg err = {:.3f}".format(np.mean(np.abs(gt_easi - easi))))
     plt.tight_layout()
     plt.savefig(f"figure/{args.exp_name}/{args.exp_name}_easi.png")
     plt.clf()
@@ -61,11 +60,11 @@ if __name__ == "__main__":
     df = pd.DataFrame(data={"Pred.": easi, "True": gt_easi})
     lm = sns.scatterplot(data=df, x="True", y="Pred.", color="0.5", alpha=0.5, legend=False)
     # lm = sns.kdeplot(data=df, x="True", y="Pred.", fill=True, color="k")
-    # lm.set(title=f"Spearman's rho on std of {args.exp_name}'s EASI score")
+    lm.set(title=f"Spearman's rho on std of {args.exp_name}'s EASI score")
     lm.set(xlim=(-0.5, None), ylim=(-0.1, None))
     lm.set(xlabel="Standard deviation of the true EASI score", ylabel="Standard deviation of the predicted EASI score", title='')
     r, p = spearmanr(gt_easi, easi, alternative="greater")
-    # lm.text(0.5, 0.5, "r = {:.3f}, p = {:.3e}".format(r, p))
+    lm.text(0.5, 0.5, "r = {:.3f}, p = {:.3e}".format(r, p))
     plt.tight_layout()
     plt.savefig(f"figure/{args.exp_name}/{args.exp_name}_easi_std.png")
     plt.clf()
@@ -82,17 +81,17 @@ if __name__ == "__main__":
     )
     lm.set(xlim=(-0.1, 3.1), ylim=(-0.1, 3.1))
     lm.set(xlabel="True severity score by sign", ylabel="Predicted severity score by sign", title='')
-    # lm.figure.suptitle(f"PCC of {args.exp_name}'s severity score")
+    lm.figure.suptitle(f"PCC of {args.exp_name}'s severity score")
     axes = lm.axes
     for i in range(len(["Erythema", "Induration", "Excoriation", "Lichenification"])):
         r, p = pearsonr(gt_severity[:, i], severity[:, i], alternative="greater")
         axes[0, i].axline((0, 0), slope=1.0, ls="--", color="black", alpha=0.5)
-        # axes[0, i].annotate("r = {:.3f}, p = {:.3e}".format(r, p), xy=(0.1, 0.9), xycoords=axes[0, i].transAxes)
-        # axes[0, i].annotate(
-        #     "Mean avg err = {:.3f}".format(np.mean(np.abs(gt_severity[:, i] - severity[:, i]))),
-        #     xy=(0.1, 0.8),
-        #     xycoords=axes[0, i].transAxes,
-        # )
+        axes[0, i].annotate("r = {:.3f}, p = {:.3e}".format(r, p), xy=(0.1, 0.9), xycoords=axes[0, i].transAxes)
+        axes[0, i].annotate(
+            "Mean avg err = {:.3f}".format(np.mean(np.abs(gt_severity[:, i] - severity[:, i]))),
+            xy=(0.1, 0.8),
+            xycoords=axes[0, i].transAxes,
+        )
     plt.tight_layout()
     plt.savefig(f"figure/{args.exp_name}/{args.exp_name}_severity.png")
     plt.clf()
@@ -104,15 +103,15 @@ if __name__ == "__main__":
     lm = sns.lmplot(data=df, x="True", y="Pred.", col="Sign", hue="Sign", scatter_kws={"alpha":0.5}, legend=False, robust=robust)
     lm.set(xlim=(-0.5, 18.5), ylim=(-0.5, 18.5))
     lm.set(xlabel="True EASI score by sign", ylabel="Predicted EASI score by sign", title='')
-    # lm.figure.suptitle(f"PCC of {args.exp_name}'s EASI score by sign")
+    lm.figure.suptitle(f"PCC of {args.exp_name}'s EASI score by sign")
     axes = lm.axes
     for i in range(len(["Erythema", "Induration", "Excoriation", "Lichenification"])):
         r, p = pearsonr(gt_easi[:, i], easi[:, i], alternative="greater")
         axes[0, i].axline((0, 0), slope=1.0, ls="--", color="black", alpha=0.5)
-        # axes[0, i].annotate("r = {:.3f}, p = {:.3e}".format(r, p), xy=(0.1, 0.9), xycoords=axes[0, i].transAxes)
-        # axes[0, i].annotate(
-        #     "Mean avg err = {:.3f}".format(np.mean(np.abs(gt_easi[:, i] - easi[:, i]))), xy=(0.1, 0.8), xycoords=axes[0, i].transAxes
-        # )
+        axes[0, i].annotate("r = {:.3f}, p = {:.3e}".format(r, p), xy=(0.1, 0.9), xycoords=axes[0, i].transAxes)
+        axes[0, i].annotate(
+            "Mean avg err = {:.3f}".format(np.mean(np.abs(gt_easi[:, i] - easi[:, i]))), xy=(0.1, 0.8), xycoords=axes[0, i].transAxes
+        )
     plt.tight_layout()
     plt.savefig(f"figure/{args.exp_name}/{args.exp_name}_easi_by_sign.png")
     plt.clf()
@@ -123,21 +122,22 @@ if __name__ == "__main__":
 
     df = pd.DataFrame(data={"Pred.": easi.reshape(-1), "True": gt_easi.reshape(-1), "Sign": Sign})
     lm = sns.lmplot(data=df, x="True", y="Pred.", col="Sign", hue="Sign", scatter_kws={"alpha":0.5}, legend=False, fit_reg=False)
-    # lm.figure.suptitle(f"Spearman's rho on std of {args.exp_name}'s EASI score by sign")
+    lm.figure.suptitle(f"Spearman's rho on std of {args.exp_name}'s EASI score by sign")
     lm.set(xlim=(-0.5, None), ylim=(0., None))
     lm.set(xlabel="Standard deviation of the true EASI score", ylabel="Standard deviation of the predicted EASI score", title='')
     axes = lm.axes
     for i in range(len(["Erythema", "Induration", "Excoriation", "Lichenification"])):
         r, p = spearmanr(gt_easi[:, i], easi[:, i], alternative="greater")
-        # axes[0, i].annotate("r = {:.3f}, p = {:.3e}".format(r, p), xy=(0.1, 0.9), xycoords=axes[0, i].transAxes)
+        axes[0, i].annotate("r = {:.3f}, p = {:.3e}".format(r, p), xy=(0.1, 0.9), xycoords=axes[0, i].transAxes)
     plt.tight_layout()
     plt.savefig(f"figure/{args.exp_name}/{args.exp_name}_easi_std_by_sign.png")
     plt.clf()
 
     # Histogram of GED
     if "ged" in results.keys():
-        df = pd.DataFrame(data={"GED": results["ged"]})
-        sns.histplot(data=df, x="GED")
+        median = np.mean(results["ged"])
+        df = pd.DataFrame(data={"MMD(L1)": results["ged"]})
+        sns.histplot(data=df, x="MMD(L1)").set(title=f"Maximum mean discrepency with L1 norm: median = {median:.3f}")
         plt.tight_layout()
         plt.savefig(f"figure/{args.exp_name}/{args.exp_name}_ged.png")
         plt.clf()

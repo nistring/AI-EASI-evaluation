@@ -1,19 +1,22 @@
-from torch.utils.data import Dataset, DataLoader
+import os
+import cv2
+import pickle
 import torch
 import numpy as np
-import os
-from torchvision.transforms import v2
-import cv2
 from tqdm import tqdm
-from patchify import patchify
-import pickle
-from sklearn.model_selection import train_test_split
-from transforms import *
-from torchvision.io import read_image, ImageReadMode
 from pathlib import Path
-from utils import area2score
+from patchify import patchify
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset, DataLoader
 from torchvision import tv_tensors
+from torchvision.io import read_image, ImageReadMode
+from torchvision.transforms import v2
 
+from transforms import *
+from utils import area2score
+
+PATCH_SIZE_MULTIPLIER = 1.5
+BASE_PATCH_SIZE = 256
 
 class WholeBodyPredictDataset(Dataset):
     def __init__(self, img_dir_path, mask_path, transforms=test_transforms, step_size=96):
@@ -22,7 +25,7 @@ class WholeBodyPredictDataset(Dataset):
         Args:
             img_dir_path (str): Directory path where images are stored.
             mask_path (str): Directory path where masks are stored.
-            transforms (optional): Defaults to test_transforms.
+            transforms (callable, optional): A function/transform to apply to the images. Defaults to test_transforms.
             step_size (int, optional): Defaults to 96.
         """
         self.transforms = transforms
@@ -31,7 +34,7 @@ class WholeBodyPredictDataset(Dataset):
         self.img_path = os.listdir(img_dir_path)
 
         # Whole body
-        self.patch_size = 256 * 1.5  # 645 * 1.5
+        self.patch_size = BASE_PATCH_SIZE * PATCH_SIZE_MULTIPLIER  # 645 * 1.5
         self.step = step_size
 
     def __getitem__(self, i):
@@ -103,7 +106,6 @@ class ROIPredict(Dataset):
     def __len__(self):
         return len(self.img_path)
 
-
 class WholeBodyTestDataset(Dataset):
     def __init__(self, img_path, seg_path, class_path, transforms, idx, mask_path, step_size):
         """Dataset for inference step in whole-body model
@@ -112,7 +114,7 @@ class WholeBodyTestDataset(Dataset):
             img_path (str): Directory path where images are stored.
             seg_path (str): Directory path where segment labelse are stored.
             class_path (str): Path where the severity class information is stored.
-            transforms :
+            transforms (callable): A function/transform to apply to the images.
             idx (List): List of individual image file paths.
             mask_path (str): Directory path where masks are stored.
             step_size (int):
@@ -201,7 +203,7 @@ class WholeBodyTrainDataset(Dataset):
 
         Args:
             img_path (str): Directory path where images are stored.
-            transforms :
+            transforms (callable): A function/transform that takes in an image and returns a transformed version.
             idx (List): List of individual image file paths.
         """
         self.transforms = transforms

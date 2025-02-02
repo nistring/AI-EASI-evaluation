@@ -1,26 +1,26 @@
 num_workers: 47
 
-# train:
-#   max_epochs: 60
-#   batch_size: [2, 1]
-#   lr: 1.0e-5
-#   weight_decay: 1.0e-5
-#   gamma: 0.95
-#   wholebody: True
-#   loss_kwargs:
-#     alpha: 1.0e+2
-#     beta: 1.0e-4
-
 train:
-  max_epochs: 100
-  batch_size: 8
-  lr: 1.0e-4
+  max_epochs: 200
+  batch_size: [4, 4]
+  lr: 1.0e-5
   weight_decay: 1.0e-5
-  gamma: 0.95
-  wholebody: False
+  gamma: 0.98
+  wholebody: True
   loss_kwargs:
     alpha: 1.0e+2
     beta: 1.0e-4
+
+# train:
+#   max_epochs: 200
+#   batch_size: 4
+#   lr:  1.0e-4
+#   weight_decay: 1.0e-5
+#   gamma: 0.98
+#   wholebody: False
+#   loss_kwargs:
+#     alpha: 1.0e+2
+#     beta: 1.0e-4
 
 
 test:
@@ -28,22 +28,15 @@ test:
   batch_size: 32
   max_num_patches: 256
   step: 96
-  topk: 2
+  topk: 10
 
 model:
   latent_dims: [1,1,1,1]
   in_channels: 3
   num_classes: 4
   num_cuts: 3
-  # weights: [[2.96629564, 0.32332072, 0.19056301, 0.51982064], # Erythema(0/1/2/3)
-  #           [0.32092193, 0.4150879,  0.62434273, 2.63964743], # Induration(0/1/2/3)
-  #           [0.43487157, 0.49160173, 0.69859193, 2.37493478], # Excoriation(0/1/2/3)
-  #           [0.3619061,  0.43210093, 0.76292346, 2.44306951]] # Lichenification(0/1/2/3)
-  # weights: [[1.9601514,  0.66902425, 0.59863738, 0.77218697], # 50% imbalance factor
-  #           [0.6586535,  0.70773103, 0.80944254, 1.82417293],
-  #           [0.71261789, 0.74232595, 0.85637541, 1.68868075],
-  #           [0.67778515, 0.71176187, 0.87058328, 1.7398697 ]]
-  weights: [[0.66142322, 1.07565039, 0.83593196, 1.42699443], # 50% imbalance with whole body
-            [0.54948369, 0.720047,   0.82778877, 1.90268054],
-            [0.56307527, 0.76260033, 0.88619182, 1.78813259],
-            [0.55480815, 0.72605318, 0.89559307, 1.82354559]]
+  weights: [[2.96629564, 0.32332072, 0.19056301, 0.51982064], # Erythema(0/1/2/3)
+            [0.32092193, 0.4150879,  0.62434273, 2.63964743], # Induration(0/1/2/3)
+            [0.43487157, 0.49160173, 0.69859193, 2.37493478], # Excoriation(0/1/2/3)
+            [0.3619061,  0.43210093, 0.76292346, 2.44306951]] # Lichenification(0/1/2/3)
+  imbalance: 0.6

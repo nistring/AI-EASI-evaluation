@@ -1,5 +1,4 @@
-# python analyze.py --exp-name "'19 Int. (SNU)"
-# python analyze.py --exp-name "'19 Ext. (SNUBH)"
-# python analyze.py --exp-name "'20 Ext. (SNUBH-adult)"
+# python analyze.py --exp-name "19_int_no_syn"
+# python analyze.py --exp-name "19_ext_no_syn"
 python analyze.py --exp-name "19_int"
-# python analyze.py --exp-name "19_ext"
+python analyze.py --exp-name "19_ext"

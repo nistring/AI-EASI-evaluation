@@ -17,8 +17,8 @@ def cal_EASI(preds):
 
     # severity
     severity = preds.float().mean(-1).cpu().numpy() / mean_area  # BNC
-    severity = 0.5 * (severity + severity.mean(2, keepdims=True))  # BNC
-    severity = np.nan_to_num(severity * area.astype(bool))  # BNC
+    # severity = 0.5 * (severity + severity.mean(2, keepdims=True))  # BNC
+    severity = np.where(np.isnan(severity), 0, severity * area.astype(bool))  # BNC
 
     # easi
     easi = area2score(mean_area) * severity  # BNC
@@ -68,7 +68,7 @@ def generalized_energy_distance(s, y):
         y (torch.Tensor): ground truth; B x M x C x H x W
 
     Returns:
-        _type_: _description_
+        torch.Tensor: Generalized energy distance for each batch.
     """
     B, N, C = s.shape[:3]
     M = y.shape[1]
@@ -77,22 +77,12 @@ def generalized_energy_distance(s, y):
     s = s / (C-1)
     y = y / (C-1)
 
-    dSY, dSS, dYY = torch.zeros(B).to(s.device), torch.zeros(B).to(s.device), torch.zeros(B).to(s.device)
+    s_flat = s.view(B, N, -1)
+    y_flat = y.view(B, M, -1)
 
-    for i in range(N):
-        for j in range(M):
-            dSY += (s[:, i]-y[:, j]).abs().mean((1, 2, 3)) # B
-    dSY *= (2 / N / M)    
-
-    for i in range(N):
-        for j in range(N):
-            dSS += (s[:, i]-s[:, j]).abs().mean((1, 2, 3)) # B
-    dSS /= (N * N)
-
-    for i in range(M):
-        for j in range(M):
-            dYY += (y[:, i]-y[:, j]).abs().mean((1, 2, 3)) # B
-    dYY /= (M * M)
+    dSY = torch.cdist(s_flat, y_flat, p=1).mean(-1).mean(-1) * 2 / (N * M)
+    dSS = torch.cdist(s_flat, s_flat, p=1).mean(-1).mean(-1) / (N * N)
+    dYY = torch.cdist(y_flat, y_flat, p=1).mean(-1).mean(-1) / (M * M)
 
     ged = (dSY - dSS - dYY).cpu().numpy()
     return ged
