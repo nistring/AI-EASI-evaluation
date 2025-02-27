@@ -162,7 +162,7 @@ class WholeBodyTestDataset(Dataset):
 
         # Area score
         if self.seg_path is None:
-            area = self.area[[i]]
+            area = self.area[i]
             seg = np.zeros(dsize[::-1], dtype=bool)[np.newaxis, :, :]
         else:
             seg = cv2.imread(str(Path(self.seg_path) / (file.split(".")[0] + ".png")), 0)
@@ -220,7 +220,7 @@ class WholeBodyTrainDataset(Dataset):
 
 
 class ROIDataset(Dataset):
-    def __init__(self, img_path, seg_path, class_path, transforms, idx, use_synthetic=False):
+    def __init__(self, img_path, seg_path, class_path, transforms, idx):
         """Dataset for training ROI model and whole-body model.
 
         Args:
@@ -234,7 +234,6 @@ class ROIDataset(Dataset):
         self.img_path = img_path
         self.seg_path = seg_path
         self.idx = idx
-        self.use_synthetic = use_synthetic
 
         with open(class_path, "rb") as f:
             data = pickle.load(f)
@@ -257,7 +256,7 @@ class ROIDataset(Dataset):
         img = norm_transforms(img)
         seg = seg.bool().squeeze(1)  # LHW
 
-        data = {
+        return {
             "img": img,
             "seg": seg,
             "area": area2score(seg.float().mean((1, 2))),
@@ -265,16 +264,12 @@ class ROIDataset(Dataset):
             "ori_img": ori_img,
             "file_name": file.split(".")[0] + ".jpg",
         }
-        if self.use_synthetic:
-            data["syn"] = self.transforms(tv_tensors.Mask(np.load(str(Path("results") / "synthetic" / (file.split(".")[0] + ".npy")))))
-
-        return data
 
     def __len__(self):
         return len(self.idx)
 
 
-def get_dataset(dataset_name, split_ratio=0.2, step_size=128, wholebody=False, synthetic=False):
+def get_dataset(dataset_name, split_ratio=0.2, step_size=128, wholebody=False):
     """Return a specific dataset requested.
 
     Args:
@@ -301,14 +296,12 @@ def get_dataset(dataset_name, split_ratio=0.2, step_size=128, wholebody=False, s
             "data/'19/classes/meta_result.pkl",
             roi_train_transforms if wholebody else train_transforms,
             train_idx,
-            synthetic,
         ), ROIDataset(
             "data/'19/images/Int. (SNU)",
             "data/'19/labels/Int. (SNU)",
             "data/'19/classes/meta_result.pkl",
             roi_test_transforms if wholebody else test_transforms,
             val_idx,
-            synthetic,
         )
     elif dataset_name == "wb_train":
         train_idx, val_idx = train_test_split(os.listdir("data/'20 Int. (SNU-adult)/images/NL"), test_size=split_ratio, random_state=42)
@@ -324,12 +317,8 @@ def get_dataset(dataset_name, split_ratio=0.2, step_size=128, wholebody=False, s
 
     # Test datasets
     elif dataset_name == "19_int":
-        if synthetic:
-            with open("data/'19/classes/train.txt", "r") as f:
-                test_idx = f.read().split("\n")
-        else:
-            with open("data/'19/classes/test.txt", "r") as f:
-                test_idx = f.read().split("\n")
+        with open("data/'19/classes/test.txt", "r") as f:
+            test_idx = f.read().split("\n")
         return ROIDataset(
             "data/'19/images/Int. (SNU)",
             "data/'19/labels/Int. (SNU)",

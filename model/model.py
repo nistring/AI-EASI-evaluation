@@ -203,6 +203,7 @@ class _StitchingDecoder(nn.Module):
         activation_fn=nn.ReLU(),
         convs_per_block=3,
         blocks_per_level=3,
+        without_ordinal_regression=False,
     ):
         """Initializes a StichtingDecoder.
 
@@ -221,6 +222,8 @@ class _StitchingDecoder(nn.Module):
             convs_per_block (int, optional): An integer specifying the number of convolutional layers. Defaults to 3.
             blocks_per_level (int, optional): An integer specifying the number of residual blocks per
                 level. Defaults to 3.
+            without_ordinal_regression (bool, optional): A boolean specifying whether to use ordinal
+                regression. Defaults to False.
         """
         super(_StitchingDecoder, self).__init__()
         self._latent_dims = latent_dims
@@ -255,13 +258,14 @@ class _StitchingDecoder(nn.Module):
         self.decoder = nn.Sequential(*decoder)
         self.decoder.apply(init_weights_orthogonal_normal)
 
-        self.last_layer = nn.Conv2d(
-            in_channels=self._channels_per_block[::-1][level], out_channels=self._num_classes, kernel_size=(1, 1), padding=0
-        )
-        # Ablation study, w/o ordinal reg.
-        # self.last_layer = nn.Conv2d(
-        #     in_channels=self._channels_per_block[::-1][level], out_channels=self._num_classes * 4, kernel_size=(1, 1), padding=0
-        # )
+        if without_ordinal_regression:
+            self.last_layer = nn.Conv2d(
+                in_channels=self._channels_per_block[::-1][level], out_channels=self._num_classes * 4, kernel_size=(1, 1), padding=0
+            )
+        else:
+            self.last_layer = nn.Conv2d(
+                in_channels=self._channels_per_block[::-1][level], out_channels=self._num_classes, kernel_size=(1, 1), padding=0
+            )            
         self.last_layer.apply(init_weights_orthogonal_normal)
 
     def forward(self, encoder_features: List[torch.Tensor], decoder_features: torch.Tensor) -> torch.Tensor:
@@ -301,6 +305,7 @@ class HierarchicalProbUNet(nn.Module):
         num_cuts=3,
         weights=None,
         imbalance=0.,
+        ablation_study=None,  # Update this parameter
     ):
         """Initializes a HierarchicalProbUNet.
 
@@ -371,6 +376,7 @@ class HierarchicalProbUNet(nn.Module):
             activation_fn=activation_fn,
             convs_per_block=convs_per_block,
             blocks_per_level=blocks_per_level,
+            without_ordinal_regression=ablation_study.get("without_ordinal_regression", False),
         )
 
         self._loss_kwargs = loss_kwargs
@@ -385,6 +391,8 @@ class HierarchicalProbUNet(nn.Module):
             self._weights = torch.ones((num_classes, num_cuts + 1))
         else:
             self._weights = (1 - imbalance) * torch.ones((num_classes, num_cuts + 1)) + imbalance * torch.Tensor(weights)
+
+        self.ablation_study = ablation_study or {}  # Store the ablation study options
 
     def _apply(self, fn):
         super(HierarchicalProbUNet, self)._apply(fn)
@@ -407,10 +415,11 @@ class HierarchicalProbUNet(nn.Module):
             Output feature maps of the prior and posterior networks.
         """
         # Ablation study, use deterministic model
-        # _q_sample = None
-        # _p_sample_z_q = self.prior(inputs=img, mean=True)  # used_latents
-        # return _q_sample, _p_sample_z_q
-    
+        if self.ablation_study.get("deterministic_model", False):
+            _q_sample = None
+            _p_sample_z_q = self.prior(inputs=img, mean=True)  # used_latents
+            return _q_sample, _p_sample_z_q
+        
         _q_sample = self.posterior(inputs=torch.concat([seg, img], dim=1), mean=mean, z_q=[])
         _p_sample_z_q = self.prior(inputs=img, z_q=_q_sample[3])  # used_latents
         return _q_sample, _p_sample_z_q
@@ -430,7 +439,7 @@ class HierarchicalProbUNet(nn.Module):
         Returns:
             torch.Tensor: A tensor of shape (mc_n, b, c, h, w, num_cut+1).
         """
-        # mean=True
+        mean = self.ablation_study.get("deterministic_model", False)
         with torch.no_grad():
             encoder_features, decoder_features, _, _ = self.prior(inputs=img, mean=mean)
             logits = self.f_comb(encoder_features=encoder_features, decoder_features=decoder_features).unsqueeze(1)
@@ -445,10 +454,11 @@ class HierarchicalProbUNet(nn.Module):
             logit_shape = logits.shape
             logits = logits.reshape((-1,) + logit_shape[2:])  # (BN)CHW
 
-            # Ablation study, w/o ordinal reg.
-            # B, _, H, W = logits.shape
-            # pred = torch.softmax(logits.reshape(B, 4, 4, H, W).permute(0, 1, 3, 4, 2), dim=-1).reshape(logit_shape[:2] + (4, H, W, 4))
-            # return pred
+            if self.ablation_study.get("without_ordinal_regression", False):
+                B, _, H, W = logits.shape
+                pred = torch.softmax(logits.reshape(B, 4, 4, H, W).permute(0, 1, 3, 4, 2), dim=-1).reshape(logit_shape[:2] + (4, H, W, 4))
+                return pred
+            
             return log_cumulative(self.cutpoints * self._alpha, logits).reshape(logit_shape + (-1,))  # BNCHWc
 
     def reconstruct(self, seg: torch.Tensor, img: torch.Tensor, mean: bool):
@@ -512,15 +522,14 @@ class HierarchicalProbUNet(nn.Module):
             Reconstruction loss
         """
         _q_sample, _p_sample_z_q, logits = self.reconstruct(seg, img, mean=mean)
-        # Ablation study, w/o ordinal reg.
-        # B, _, H, W = logits.shape
-        # pred = torch.softmax(logits.reshape(B, 4, 4, H, W).permute(0, 1, 3, 4, 2), dim=-1)
-        pred = log_cumulative(self.cutpoints * self._alpha, logits)  # BCHWc
-        
-        # Use cross entropy loss instead of dice loss
-        # loss = self.ce_loss(pred, seg)
-        loss = self.dice_loss(pred, F.one_hot(seg, num_classes=self._num_cuts + 1))
 
+        if self.ablation_study.get("without_ordinal_regression", False):
+            B, _, H, W = logits.shape
+            pred = torch.softmax(logits.reshape(B, 4, 4, H, W).permute(0, 1, 3, 4, 2), dim=-1)
+        else:
+            pred = log_cumulative(self.cutpoints * self._alpha, logits)  # BCHWc
+        
+        loss = self.dice_loss(pred, F.one_hot(seg, num_classes=self._num_cuts + 1))
         return _q_sample, _p_sample_z_q, loss
 
     def kl_divergence(self, q_dists: torch.Tensor, p_dists: torch.Tensor):
@@ -561,18 +570,16 @@ class HierarchicalProbUNet(nn.Module):
         _q_sample, _p_sample_z_q, rec_loss = self.rec_loss(seg, img, mean)
         summaries["rec_loss"] = rec_loss
 
-        # kl loss
-        kl_dict = self.kl_divergence(_q_sample[2], _p_sample_z_q[2])
-        kl_sum = torch.stack([kl for _, kl in kl_dict.items()], dim=-1).sum()
-        summaries["kl_sum"] = kl_sum
-        for level, kl in kl_dict.items():
-            summaries["kl_{}".format(level)] = kl
+        if not self.ablation_study.get("deterministic_model", False):
+            kl_dict = self.kl_divergence(_q_sample[2], _p_sample_z_q[2])
+            kl_sum = torch.stack([kl for _, kl in kl_dict.items()], dim=-1).sum()
+            summaries["kl_sum"] = kl_sum
+            for level, kl in kl_dict.items():
+                summaries["kl_{}".format(level)] = kl
 
-        # ELBO
-        loss = rec_loss + self._loss_kwargs["beta"] * kl_sum
-
-        # Ablation study, use deterministic model
-        # loss = rec_loss
+            loss = rec_loss + self._loss_kwargs["beta"] * kl_sum
+        else:
+            loss = rec_loss
 
         summaries["loss"] = loss
         return dict(supervised_loss=loss, summaries=summaries)

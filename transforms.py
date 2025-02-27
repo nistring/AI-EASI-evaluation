@@ -2,13 +2,13 @@ import torch
 from torchvision.transforms import v2
 
 class CustomCrop(torch.nn.Module):
-    def __init__(self, size, th=0.125, n=32):
+    def __init__(self, size, th=0.125, n=10):
         """A custom transformation module that selectively crops nonzero area.
 
         Args:
             size (Tuple[int, int]): Size of the patch.
             th (float, optional): The threshold value of minimum proportion of nonzero area. Defaults to 0.125.
-            n (int, optional): Number of patches to be extracted from a single image. Defaults to 32.
+            n (int, optional): Number of patches to be extracted from a single image. Defaults to 10, which is the same copy number of a roi image.
         """
         super().__init__()
         self.size = size
@@ -25,7 +25,7 @@ class CustomCrop(torch.nn.Module):
                 x = torch.randint(0, x_high, (1,)).item()
                 y = torch.randint(0, y_high, (1,)).item()
                 crop = img[:, y : y + random_size, x : x + random_size]
-                if (crop > 0).sum().item() / crop.numel() >= self.th:
+                if (crop > 0).sum().item() / crop.numel() > self.th:
                     break
             images.append(crop)
 

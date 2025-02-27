@@ -70,7 +70,7 @@ def generalized_energy_distance(s, y):
     Returns:
         torch.Tensor: Generalized energy distance for each batch.
     """
-    B, N, C = s.shape[:3]
+    B, N, C, H, W = s.shape
     M = y.shape[1]
 
     # 0-3 to 0-1 scale
@@ -80,9 +80,9 @@ def generalized_energy_distance(s, y):
     s_flat = s.view(B, N, -1)
     y_flat = y.view(B, M, -1)
 
-    dSY = torch.cdist(s_flat, y_flat, p=1).mean(-1).mean(-1) * 2 / (N * M)
-    dSS = torch.cdist(s_flat, s_flat, p=1).mean(-1).mean(-1) / (N * N)
-    dYY = torch.cdist(y_flat, y_flat, p=1).mean(-1).mean(-1) / (M * M)
+    dSY = torch.cdist(s_flat, y_flat, p=1).mean((1, 2))
+    dSS = torch.cdist(s_flat, s_flat, p=1).mean((1, 2))
+    dYY = torch.cdist(y_flat, y_flat, p=1).mean((1, 2))
 
-    ged = (dSY - dSS - dYY).cpu().numpy()
+    ged = ((2 * dSY - dSS - dYY) / C / H / W).cpu().numpy()
     return ged

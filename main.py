@@ -2,8 +2,6 @@ import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 
-torch.manual_seed(42)
-
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.utilities.combined_loader import CombinedLoader
@@ -24,20 +22,19 @@ from utils import *
 
 
 class AtopyDataModule(pl.LightningDataModule):
-    def __init__(self, cfg, test_dataset, synthetic):
+    def __init__(self, cfg, test_dataset):
         super().__init__()
         self.cfg = cfg
         self.test_dataset = test_dataset
-        self.synthetic = synthetic
 
     def setup(self, stage):
-        self.roi_train, self.roi_val = get_dataset("roi_train", wholebody=self.cfg.train.wholebody, synthetic=self.synthetic)
+        self.roi_train, self.roi_val = get_dataset("roi_train", wholebody=self.cfg.train.wholebody)
         if self.cfg.train.wholebody:
             self.wb_train, self.wb_val = get_dataset("wb_train")
         else:
             self.wb_train, self.wb_val = None, None
 
-        self.test = get_dataset(self.test_dataset, step_size=self.cfg.test.step, synthetic=self.synthetic)
+        self.test = get_dataset(self.test_dataset, step_size=self.cfg.test.step)
 
     def train_dataloader(self):
         if self.cfg.train.wholebody:
@@ -107,21 +104,20 @@ class AtopyDataModule(pl.LightningDataModule):
     def predict_dataloader(self):
         return DataLoader(
             self.test,
-            batch_size=1,
+            batch_size=self.cfg.test.batch_size,
             num_workers=self.cfg.num_workers,
             pin_memory=False,
         )
 
 
 class LitModel(pl.LightningModule):
-    def __init__(self, model, cfg, exp_name=None, synthetic=False):
+    def __init__(self, model, cfg, exp_name=None):
         super().__init__()
 
         self.model = model
         self.cfg = cfg
         self.mc_n = cfg.test.mc_n
         self.exp_name = exp_name
-        self.synthetic = synthetic
         self.cfg.exp_date = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
         self.step = self.cfg.test.step
 
@@ -133,10 +129,9 @@ class LitModel(pl.LightningModule):
         self.window = torch.from_numpy(wind).unsqueeze(-1)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(
+        optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.cfg.train.lr,
-            weight_decay=self.cfg.train.weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=self.cfg.train.gamma)
         return {"optimizer": optimizer, "lr_scheduler": scheduler}
@@ -165,6 +160,10 @@ class LitModel(pl.LightningModule):
         self.file_names = []
         self.ged = []
 
+        # Set random seed
+        torch.manual_seed(0)
+        np.random.seed(0)
+
     def test_step(self, batch, batch_idx):
         # Load batch
         seg = batch["seg"]  # BLHW
@@ -190,16 +189,6 @@ class LitModel(pl.LightningModule):
             area, severity, easi, preds = self.inference_patch(batch)
 
             self.ged.append(generalized_energy_distance(gt, preds))
-
-            if self.synthetic == True:
-                dSY = torch.zeros(B, self.mc_n).to(gt.device)
-                for i in range(gt.shape[1]):
-                    for j in range(self.mc_n):
-                        dSY[:, j] += (gt[:, i] - preds[:, j]).float().abs().mean((1, 2, 3))
-                topks = torch.topk(dSY, k=self.cfg.test.topk, dim=-1, largest=False)[1]  # Bk
-                for i in range(preds.shape[0]):
-                    np.save(f"results/synthetic/{file_name[i].split('.')[0] + '.npy'}", preds[i, topks[i]].cpu().numpy())
-                return
 
             preds = F.one_hot(preds, num_classes=num_classes).float().mean(1).cpu().numpy()  # BCHW4
         elif "patches" in batch.keys():
@@ -251,12 +240,18 @@ class LitModel(pl.LightningModule):
                 )
 
             # Concatenate prediction and GT and save it.
-            cv2.imwrite(f"results/{self.exp_name}/{file_name[i]}", np.concatenate((pred_img, gt_img), axis=0))
+            checkpoint_dir = os.path.dirname(os.path.dirname(args.checkpoint))
+            results_dir = f"{checkpoint_dir}/results/{self.exp_name}"
+            os.makedirs(results_dir, exist_ok=True)
+            cv2.imwrite(f"{results_dir}/{file_name[i]}", np.concatenate((pred_img, gt_img), axis=0))
 
     def on_test_end(self):
         # Write results
         self.easi = np.concatenate(self.easi)  # BNC
-        with open(f"results/{self.exp_name}/results.pkl", "wb") as f:
+        checkpoint_dir = os.path.dirname(os.path.dirname(args.checkpoint))
+        results_dir = f"{checkpoint_dir}/results/{self.exp_name}"
+        os.makedirs(results_dir, exist_ok=True)
+        with open(f"{results_dir}/results.pkl", "wb") as f:
             pickle.dump(
                 {
                     "gt_area": np.concatenate(self.gt_area),  # BN
@@ -272,7 +267,7 @@ class LitModel(pl.LightningModule):
 
         pd.DataFrame(
             self.easi.mean(1), columns=["Erythema", "Edema/Papulation", "Excoriation", "Lichenification"], index=self.file_names
-        ).to_excel(f"results/{self.exp_name}/easi.xlsx")
+        ).to_csv(f"{results_dir}/easi.csv")
 
     def predict_step(self, batch, batch_idx):
         # Load batch
@@ -302,27 +297,29 @@ class LitModel(pl.LightningModule):
     def forward_step(self, phase, batch):
         if isinstance(batch, list):  # Use whole-body images and ROI images jointly.
             batch, wb_batch = batch
+            wb_img = torch.flatten(wb_batch["img"], 0, 1)  # (BN)3HW
+            wb_seg = torch.flatten(wb_batch["seg"], 0, 1)  # (BN)HW
 
-            wb_img = wb_batch["img"]  # BN3HW
-            wb_seg = wb_batch["seg"]  # BNHW
-            wb_img = torch.flatten(wb_img, 0, 1)  # (BN)3HW
-            wb_seg = torch.flatten(wb_seg, 0, 1)  # (BN)HW
+            img = batch["img"]  # B3HW
+            seg = batch["seg"][:, None, :, None, :, :]  # B1L1HW
+            grade = batch["grade"][:, :, None, :, None, None]  # BL'1C11
 
-        img = batch["img"]  # B3HW
-        seg = batch["seg"][:, None, :, None, :, :]  # B1L1HW
-        grade = batch["grade"][:, :, None, :, None, None]  # BL'1C11
+            seg = torch.flatten(seg * grade, 1, 2)  # BNCHW
+            img = torch.flatten(img.unsqueeze(1).expand(-1, seg.shape[1], -1, -1, -1), 0, 1)  # (BN)3HW
+            seg = torch.flatten(seg, 0, 1)  # (BN)CHW
 
-        seg = torch.flatten(seg * grade, 1, 2)  # BNCHW
-        if "syn" in batch.keys():
-            seg = torch.cat([seg, batch["syn"]], axis=1)  # BN'CHW
-        img = torch.flatten(img.unsqueeze(1).expand(-1, seg.shape[1], -1, -1, -1), 0, 1)  # (BN)3HW
-        seg = torch.flatten(seg, 0, 1)  # (BN)CHW
-
-        # Segmentation and grade labels of an image are intended to be fed into the model at the same time,
-        # to learn diverse possibilities that the image possesses.
-        if isinstance(batch, list):
+            # Segmentation and grade labels of an image are intended to be fed into the model at the same time,
+            # to learn diverse possibilities that the image possesses.
             img = torch.cat([img, wb_img])
             seg = torch.cat([seg, wb_seg])
+        else:
+            img = batch["img"]  # B3HW
+            seg = batch["seg"][:, None, :, None, :, :]  # B1L1HW
+            grade = batch["grade"][:, :, None, :, None, None]  # BL'1C11
+
+            seg = torch.flatten(seg * grade, 1, 2)  # BNCHW
+            img = torch.flatten(img.unsqueeze(1).expand(-1, seg.shape[1], -1, -1, -1), 0, 1)  # (BN)3HW
+            seg = torch.flatten(seg, 0, 1)  # (BN)CHW
 
         loss_dict = self.model.sum_loss(seg, img)
         self.log_dict(
@@ -373,7 +370,6 @@ class LitModel(pl.LightningModule):
                    - easi (torch.Tensor): Shape (1, N, C) where C is the number of classes.
                    - preds (torch.Tensor): Shape (N, C, H, W) where N is the number of patches, C is the number of classes, and H, W are the height and width of the whole-body image.
         """
-        assert self.cfg.test.batch_size == 1
         # Load Batch
         patches = batch["patches"][0]  # NyNx3HW
         mask = batch["mask"][0]  # 1HW
@@ -383,7 +379,7 @@ class LitModel(pl.LightningModule):
         nx = patches.shape[1]
         preds = torch.zeros(
             (
-                8,
+                self.mc_n,
                 self.cfg.model.num_classes,
                 (patches.shape[0] - 1) * self.step + 256,
                 (patches.shape[1] - 1) * self.step + 256,
@@ -402,6 +398,9 @@ class LitModel(pl.LightningModule):
         bs = self.cfg.test.max_num_patches
 
         # Do an inference step with 8 different orientiations to reduce possible variablity
+        assert self.mc_n % 8 == 0
+        mc_n = self.mc_n // 8
+        
         cnt = 0
         for rot in range(4):
             for flip in [True, False]:
@@ -410,17 +409,17 @@ class LitModel(pl.LightningModule):
                     img = torch.flip(img, dims=(3,))
                 for i in range(0, N, bs):
                     end = min(i + bs, N)
-                    pred = self.model.sample(img[i:end], 1, mean=True).squeeze(1)  # BCHW4
+                    pred = self.model.sample(img[i:end], mc_n) # BNCHW4
 
                     if flip:
-                        pred = torch.flip(pred, dims=(3,))
-                    pred = torch.rot90(pred, -rot, dims=(2, 3)) * window
+                        pred = torch.flip(pred, dims=(4,))
+                    pred = torch.rot90(pred, -rot, dims=(3, 4)) * window
 
                     for j in range(end - i):
                         y = (i + j) // nx * self.step
                         x = (i + j) % nx * self.step
-                        preds[cnt, :, y : y + 256, x : x + 256] += pred[j]
-                        norm[cnt, :, y : y + 256, x : x + 256] += window
+                        preds[cnt * mc_n : (cnt + 1) * mc_n, :, y : y + 256, x : x + 256] += pred[j]
+                        norm[cnt * mc_n : (cnt + 1) * mc_n, :, y : y + 256, x : x + 256] += window
 
                 cnt += 1
 
@@ -462,6 +461,7 @@ class LitModel(pl.LightningModule):
         """
         area_mean, area_std = area.mean(), area.std()
         severity_mean, severity_std = severity.mean(0), severity.std(0)
+        easi = easi.sum(1)
         easi_mean, easi_std = easi.mean(), easi.std()
         severity_lower_bound = np.clip(severity_mean - severity_std, 0, 3)
         severity_upper_bound = np.clip(severity_mean + severity_std, 0, 3)
@@ -480,7 +480,7 @@ if __name__ == "__main__":
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
     torch.set_float32_matmul_precision("high")
-    torch.backends.cudnn.enabled = False   # The input data is not of contiguous type
+    # torch.backends.cudnn.enabled = False   # The input data is not of contiguous type
 
     # arguments
     parser = ArgumentParser()
@@ -489,13 +489,12 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str, help="Path to checkpoint")
     parser.add_argument("--cfg", type=str, default="config.yaml")
     parser.add_argument("--test-dataset", type=str, default="19_int")
-    parser.add_argument("--synthetic", action="store_true", help="Use/make synthetic data")
     args = parser.parse_args()
     cfg = load_config(args.cfg)
-    cfg.test.wholebody = True if args.test_dataset in ["20_int", "20_ext", "wb_predict"] else False
+    wholebody = True if args.test_dataset in ["20_int", "20_ext", "wb_predict"] else False
 
     # dataset
-    atopy = AtopyDataModule(cfg, args.test_dataset, args.synthetic)
+    atopy = AtopyDataModule(cfg, args.test_dataset)
 
     # model
     model = HierarchicalProbUNet(
@@ -505,15 +504,16 @@ if __name__ == "__main__":
         loss_kwargs=dict(cfg.train.loss_kwargs),
         num_cuts=cfg.model.num_cuts,
         weights=cfg.model.weights,
-        imbalance=cfg.model.imbalance
+        imbalance=cfg.model.imbalance,
+        ablation_study=cfg.model.ablation_study  # Pass the ablation study options
     )
 
     if args.checkpoint:
         litmodel = LitModel.load_from_checkpoint(
-            args.checkpoint, synthetic=args.synthetic, model=model, cfg=cfg, map_location=lambda storage, loc: storage.cuda()
+            args.checkpoint, model=model, cfg=cfg, map_location=lambda storage, loc: storage.cuda()
         )
     else:
-        litmodel = LitModel(model, synthetic=args.synthetic, cfg=cfg)
+        litmodel = LitModel(model, cfg=cfg)
 
     # train
     if args.phase == "train":
@@ -522,12 +522,13 @@ if __name__ == "__main__":
         trainer = pl.Trainer(
             max_epochs=cfg.train.max_epochs,
             devices=args.devices,
-            accelerator="gpu",
-            strategy="ddp",
             callbacks=[checkpoint_callback, lr_monitor],
             check_val_every_n_epoch=1,
             log_every_n_steps=1,
             gradient_clip_val=0.5,
+            precision="bf16-mixed",
+            sync_batchnorm=True,
+            strategy="ddp_find_unused_parameters_true"
         )
         trainer.fit(litmodel, datamodule=atopy)
         shutil.copy("config.yaml", f"{trainer.logger.log_dir}/config.yaml")
@@ -536,9 +537,8 @@ if __name__ == "__main__":
         trainer = pl.Trainer(devices=[args.devices])
         if args.phase == "test":
             litmodel.exp_name = args.test_dataset
-            if cfg.test.wholebody:
+            if wholebody:
                 cfg.test.batch_size = 1
-            os.makedirs("results/" + args.test_dataset, exist_ok=True)
             trainer.test(litmodel, datamodule=atopy)
         else:
             os.makedirs("figure/images", exist_ok=True)

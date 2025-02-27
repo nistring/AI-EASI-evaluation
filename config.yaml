@@ -1,10 +1,9 @@
-num_workers: 47
+num_workers: 6
 
 train:
   max_epochs: 200
-  batch_size: [4, 4]
-  lr: 1.0e-5
-  weight_decay: 1.0e-5
+  batch_size: [8, 8]
+  lr: 1.0e-4
   gamma: 0.98
   wholebody: True
   loss_kwargs:
@@ -13,9 +12,8 @@ train:
 
 # train:
 #   max_epochs: 200
-#   batch_size: 4
+#   batch_size: 16
 #   lr:  1.0e-4
-#   weight_decay: 1.0e-5
 #   gamma: 0.98
 #   wholebody: False
 #   loss_kwargs:
@@ -26,17 +24,23 @@ train:
 test:
   mc_n: 32
   batch_size: 32
-  max_num_patches: 256
+  max_num_patches: 8
   step: 96
-  topk: 10
 
 model:
   latent_dims: [1,1,1,1]
   in_channels: 3
   num_classes: 4
   num_cuts: 3
-  weights: [[2.96629564, 0.32332072, 0.19056301, 0.51982064], # Erythema(0/1/2/3)
-            [0.32092193, 0.4150879,  0.62434273, 2.63964743], # Induration(0/1/2/3)
-            [0.43487157, 0.49160173, 0.69859193, 2.37493478], # Excoriation(0/1/2/3)
-            [0.3619061,  0.43210093, 0.76292346, 2.44306951]] # Lichenification(0/1/2/3)
-  imbalance: 0.6
+  # weights: [[2.96629564, 0.32332072, 0.19056301, 0.51982064], # Erythema(0/1/2/3)
+  #           [0.32092193, 0.4150879,  0.62434273, 2.63964743], # Induration(0/1/2/3)
+  #           [0.43487157, 0.49160173, 0.69859193, 2.37493478], # Excoriation(0/1/2/3)
+  #           [0.3619061,  0.43210093, 0.76292346, 2.44306951]] # Lichenification(0/1/2/3)
+  weights: [[0.5, 2, 2, 2], # Erythema(0/1/2/3)
+            [0.5, 2, 2, 2], # Induration(0/1/2/3)
+            [0.5, 2, 2, 2], # Excoriation(0/1/2/3)
+            [0.5, 2, 2, 2]] # Lichenification(0/1/2/3)  
+  imbalance: 1.0
+  ablation_study:
+    deterministic_model: False
+    without_ordinal_regression: False
