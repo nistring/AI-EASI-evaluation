@@ -491,7 +491,6 @@ if __name__ == "__main__":
     parser.add_argument("--test-dataset", type=str, default="19_int")
     args = parser.parse_args()
     cfg = load_config(args.cfg)
-    wholebody = True if args.test_dataset in ["20_int", "20_ext", "wb_predict"] else False
 
     # dataset
     atopy = AtopyDataModule(cfg, args.test_dataset)
@@ -537,7 +536,7 @@ if __name__ == "__main__":
         trainer = pl.Trainer(devices=[args.devices])
         if args.phase == "test":
             litmodel.exp_name = args.test_dataset
-            if wholebody:
+            if args.test_dataset in ["20_int", "20_ext", "wb_predict"]:
                 cfg.test.batch_size = 1
             trainer.test(litmodel, datamodule=atopy)
         else:

@@ -2,7 +2,7 @@ import torch
 from torchvision.transforms import v2
 
 class CustomCrop(torch.nn.Module):
-    def __init__(self, size, th=0.125, n=10):
+    def __init__(self, size, th=0.01, n=10):
         """A custom transformation module that selectively crops nonzero area.
 
         Args:
@@ -64,11 +64,10 @@ roi_train_transforms = v2.Compose(
     [
         v2.RandomHorizontalFlip(),
         v2.RandomPerspective(),
-        v2.RandomAffine(degrees=180, translate=(0.5, 0.5)),
+        v2.RandomRotation(180),
+        v2.RandomApply([v2.RandomAffine(degrees=0, translate=(0.5, 0.5))]),
         v2.RandomResizedCrop((256, 256), scale=(0.25, 1.0), antialias=True, ratio=(1.0, 1.0)),
-        v2.RandomResize(128, 256, antialias=True),
-        v2.Resize((256, 256), antialias=True),
-        v2.RandomErasing(),
+        v2.RandomApply([v2.RandomResize(128, 256, antialias=True), v2.Resize((256, 256), antialias=True)]),
         v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
     ]
 )

@@ -2,8 +2,6 @@
 
 ## Applying a Probabilistic Deep Learning Algorithm to Whole Body Images
 
-![55036999_File000000_1347229217](https://github.com/nistring/AI-EASI-evaluation/assets/71208448/97356d13-0b5c-48be-99ee-192513b8a2cd)
-
 ### Abstract
 
 Assessing the severity of atopic dermatitis (AD) is critical for tailoring effective treatment options for patients. The widely used Eczema Area and Severity Index (EASI) allows dermatologists to evaluate AD severity. However, inter-observer variability in EASI scores can lead to discrepancies in clinical decision-making. To address this, we propose a novel approach using a probabilistic deep learning model to assess AD severity across the entire body.
@@ -23,31 +21,11 @@ Our goal is to develop an AI model that provides reliable and consistent AD seve
    - We collected full-body photographs from 14 AD patients.
    - Three dermatologists independently assessed EASI scores for each patient.
 
-2. **Severity Categorization**:
-   - We categorized whole-body EASI scores as follows:
-     - Mild: EASI < 6
-     - Moderate: 6 ≤ EASI ≤ 23
-     - Severe: EASI > 23
-
-3. **Probabilistic Deep Learning Model**:
+2. **Probabilistic Deep Learning Model**:
    - We trained an AI model using deep learning techniques.
    - The model predicts AD severity probabilities across the entire body.
 
 ### Results
-
-- **Correlation with Ground Truth**:
-  
-  ![image](https://github.com/nistring/AI-EASI-evaluation/assets/71208448/5b621382-e5b3-40c0-a72c-d98a2c83f7d6)
-  
-  - Pearson correlation coefficients:
-    - Internal test set (a): 0.724
-    - External test set (b): 0.738
-
-- **Agreement with Dermatologists**:
-
-  ![image](https://github.com/nistring/AI-EASI-evaluation/assets/71208448/d986dee5-6335-4648-98ea-2a5ffe19f58b)
-
-  - In whole-body image evaluation, the AI model agreed (completely or partially) with dermatologists in 11 out of 14 cases (78.6%).
 
 ### Getting started
   ```

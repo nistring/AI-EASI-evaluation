@@ -1,9 +1,9 @@
 num_workers: 6
 
 train:
-  max_epochs: 200
-  batch_size: [8, 8]
-  lr: 1.0e-4
+  max_epochs: 100
+  batch_size: [6, 6]
+  lr: 1.0e-5
   gamma: 0.98
   wholebody: True
   loss_kwargs:
@@ -23,7 +23,7 @@ train:
 
 test:
   mc_n: 32
-  batch_size: 32
+  batch_size: 1
   max_num_patches: 8
   step: 96
 
@@ -40,7 +40,7 @@ model:
             [0.5, 2, 2, 2], # Induration(0/1/2/3)
             [0.5, 2, 2, 2], # Excoriation(0/1/2/3)
             [0.5, 2, 2, 2]] # Lichenification(0/1/2/3)  
-  imbalance: 1.0
+  imbalance: 0.0
   ablation_study:
     deterministic_model: False
     without_ordinal_regression: False

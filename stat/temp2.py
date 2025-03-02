@@ -5,7 +5,7 @@ from pathlib import Path
 expert = pd.read_excel('results/Results_expert+AI.xlsx')
 
 dfs = []
-for version in Path('lightning_logs/weight2').iterdir():
+for version in Path('lightning_logs/0.0_wb_new').iterdir():
     df = pd.concat([pd.read_csv(file, index_col=0) for file in version.glob('**/easi.csv')])
     df.index = df.index.str.replace('.jpg', '')
     df = df.reindex(expert.Photo)

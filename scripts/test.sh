@@ -10,11 +10,11 @@
 #     done
 # done
 
-for test_dataset in "19_int" "19_ext"; do
-    for version_dir in lightning_logs/0.0_whole/version_*; do
+for test_dataset in "20_int" "20_ext"; do
+    for version_dir in lightning_logs/version_0; do
         for checkpoint in "${version_dir}/checkpoints/"epoch*.ckpt; do
         if [ -f "$checkpoint" ]; then
-            python main.py --phase test --checkpoint "$checkpoint" --devices 0 --test-dataset "$test_dataset" --cfg "$version_dir/config.yaml"
+            python main.py --phase test --checkpoint "$checkpoint" --devices 0 --test-dataset "$test_dataset" --cfg "config.yaml"
         fi
         done
     done

@@ -163,8 +163,7 @@ data
 results
 nohup.out
 lightning_logs/
-*.run
+scripts
 .vscode
-weights
 figure
-unused_res
+stat

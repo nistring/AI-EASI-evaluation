@@ -84,8 +84,10 @@ if __name__ == "__main__":
             lm.set(title=f"Spearman's rho on std of {results_path.parent.name}'s EASI score")
             lm.set(xlim=(-0.5, None), ylim=(-0.1, None))
             lm.set(xlabel="Standard deviation of the true EASI score", ylabel="Standard deviation of the predicted EASI score", title='')
+            mean_std = gt_easi.mean()
+            std_std = gt_easi.std()
             r, p = spearmanr(gt_easi, easi, alternative="greater")
-            lm.text(0.5, 0.5, "r = {:.3f}, p = {:.3e}".format(r, p))
+            lm.text(0.5, 0.5, "r = {:.3f}, p = {:.3e}, std = {:.2f}({:.2f})".format(r, p, mean_std, std_std))
             stats.append({
                 "Metric": "EASI std",
                 "Version": results_path.parent.name,
@@ -169,7 +171,9 @@ if __name__ == "__main__":
             axes = lm.axes
             for i in range(len(["Erythema", "Induration", "Excoriation", "Lichenification"])):
                 r, p = spearmanr(gt_easi[:, i], easi[:, i], alternative="greater")
-                axes[0, i].annotate("r = {:.3f}, p = {:.3e}".format(r, p), xy=(0.1, 0.9), xycoords=axes[0, i].transAxes)
+                mean_std = gt_easi[:, i].mean()
+                std_std = gt_easi[:, i].std()
+                axes[0, i].annotate("r = {:.3f}, p = {:.3e}, std = {:.2f}({:.2f})".format(r, p, mean_std, std_std), xy=(0.1, 0.9), xycoords=axes[0, i].transAxes)
                 stats.append({
                     "Metric": f"EASI std {['Erythema', 'Induration', 'Excoriation', 'Lichenification'][i]}",
                     "Version": results_path.parent.name,
@@ -195,7 +199,7 @@ if __name__ == "__main__":
                 plt.close()
         return stats
 
-    root_dir = Path("lightning_logs/0.0_whole")
+    root_dir = Path("lightning_logs/0.0_wb_new")
     versions = [version_path for version_path in root_dir.rglob("version_*/")]
     with Pool(len(versions)) as p:
         all_stats = p.map(process_version, versions)
