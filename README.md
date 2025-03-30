@@ -1,6 +1,4 @@
-# Overcoming Inherent Uncertainty of Atopic Dermatitis Severity Assessment
-
-## Applying a Probabilistic Deep Learning Algorithm to Whole Body Images
+# Probabilistic Ordinal Segmentation for Assessing Eczema Area and Severity Index
 
 ### Abstract
 
