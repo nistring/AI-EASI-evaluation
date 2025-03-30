@@ -187,9 +187,7 @@ class LitModel(pl.LightningModule):
         # Prediction
         if "img" in batch.keys():  # Only ROI images
             area, severity, easi, preds = self.inference_patch(batch)
-
             self.ged.append(generalized_energy_distance(gt, preds))
-
             preds = F.one_hot(preds, num_classes=num_classes).float().mean(1).cpu().numpy()  # BCHW4
         elif "patches" in batch.keys():
             area, severity, easi, preds = self.inference_wholebody(batch, num_classes)
@@ -271,28 +269,41 @@ class LitModel(pl.LightningModule):
 
     def predict_step(self, batch, batch_idx):
         # Load batch
-        ori_img = batch["ori_img"][0].cpu().numpy()
+        ori_img = batch["ori_img"].cpu().numpy()
         file_name = batch["file_name"][0]
         num_classes = self.cfg.model.num_cuts + 1
 
         # Prediction
-        if not self.cfg.test.wholebody:
+        if not self.cfg.train.wholebody:
             area, severity, easi, preds = self.inference_patch(batch)
-            preds = F.one_hot(preds, num_classes=num_classes).float()[0].cpu().numpy()  # NCHW4
+            preds = F.one_hot(preds, num_classes=num_classes).float().mean(1).cpu().numpy()  # BCHW4
         else:
             area, severity, easi, preds = self.inference_wholebody(batch, num_classes)
-            preds = F.one_hot(preds, num_classes=num_classes).float().cpu().numpy()  # NCHW4
+            preds = F.one_hot(preds, num_classes=num_classes).float().mean(0, keepdim=True).cpu().numpy()  # NCHW4
 
         # visualization
         N, C, H, W = preds.shape[:-1]
 
-        # Add mean of gt and preds
-        preds = np.concatenate([preds, preds.mean(1, keepdims=True)], axis=1)
+        font_size = max(H // 256, 1)
+        resized_ori = cv2.resize(ori_img[0], (W, H))
 
-        for i in range(N):
-            hm_img = heatmap(cv2.resize(ori_img, (W, H)), preds[i])
-            for j, sign in enumerate(["e", "i", "ex", "l", "mean"]):
-                cv2.imwrite(f"figure/images/{file_name.split('.')[0]}_{sign}_{i}.jpg", hm_img[j])
+        # Pred summary
+        pred_img = self.vis_pred(resized_ori, preds[0])
+        text = self.write_summary(area[0], severity[0], easi[0])
+        for j, t in enumerate(text):
+            cv2.putText(
+                pred_img,
+                t,
+                (10, 25 * (j + 1) * font_size),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_size / 2,
+                (255, 90, 0),
+                font_size,
+                cv2.LINE_AA,
+            )
+
+        os.makedirs(f"results/images", exist_ok=True)
+        cv2.imwrite(f"results/images/{file_name.split('.')[0]}.jpg", pred_img)
 
     def forward_step(self, phase, batch):
         if isinstance(batch, list):  # Use whole-body images and ROI images jointly.
@@ -533,6 +544,7 @@ if __name__ == "__main__":
         shutil.copy("config.yaml", f"{trainer.logger.log_dir}/config.yaml")
     # test
     else:
+        assert args.checkpoint is not None
         trainer = pl.Trainer(devices=[args.devices])
         if args.phase == "test":
             litmodel.exp_name = args.test_dataset
@@ -540,5 +552,4 @@ if __name__ == "__main__":
                 cfg.test.batch_size = 1
             trainer.test(litmodel, datamodule=atopy)
         else:
-            os.makedirs("figure/images", exist_ok=True)
             trainer.predict(litmodel, datamodule=atopy)

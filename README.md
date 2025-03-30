@@ -25,14 +25,19 @@ Our goal is to develop an AI model that provides reliable and consistent AD seve
    - We trained an AI model using deep learning techniques.
    - The model predicts AD severity probabilities across the entire body.
 
-### Results
 
 ### Getting started
   ```
   git clone https://github.com/nistring/AI-EASI-evaluation.git
   pip install -r requirements.txt
   ```
-- You can download the weights from [google drive](https://drive.google.com/drive/folders/12JEz5lnL-9r00-QR1cPN3fKRAB6o6RJr?usp=sharing)
+- You can download the pre-trained model weights for both ROI and whole-body models:
+
+- **ROI Model**: [Download ROI Model Weights](https://drive.google.com/file/d/1Nir6_lJnZyHMf2BJ1yPgAdKCL3enXIzx/view?usp=drive_link)
+- **Whole-body Model**: [Download Whole-body Model Weights](https://drive.google.com/file/d/1NixHaf3K1GaJji9L6sqLsq9gQHFKY2BH/view?usp=drive_link)
+
+- After downloading, place the weight files in your project directory and specify the path to them using the `--checkpoint` parameter when running the script.
+
 - To use this model with your custom data, save the image files in the following paths.
   ```
   ├──  data  
@@ -41,12 +46,21 @@ Our goal is to develop an AI model that provides reliable and consistent AD seve
   │        └── image - the folder for body images.
   │        └── mask - the folder for masking unwanted areas(e.g. backgrounds, clothes). If it does not exist, the black area of the image will be the masking area.
   ```
-- Then, run the `predict.sh` script in `scripts` folder.
-- The format of the script is
+- Run script, for example
   ```
-  python main.py --phase predict --checkpoint path_to_weights --devices 2 --test-dataset roi_predict or wb_predict
+  python main.py --phase predict --checkpoint path_to_weights --devices 0 --test-dataset roi_predict or wb_predict
   ```
+### Configuration
 
+- The default configuration file is located at `config.yaml` in the project root directory.
+- To switch between ROI and whole-body models, modify the `wholebody` parameter in the configuration file:
+  - Set `wholebody: true` to use the whole-body model
+  - Set `wholebody: false` to use the ROI model
+- Example configuration:
+  ```yaml
+  train:
+    wholebody: true  # Set to false for ROI model
+  ```
 
 ### Acknowledgments
 This work is based on a [pytorch implementation](https://github.com/Zerkoar/hierarchical_probabilistic_unet_pytorch) of [hierarchical probabilistic unet](https://arxiv.org/abs/1905.13077v1)

@@ -159,7 +159,10 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-data
+data/'19
+data/'20 Ext. (SNUBH-adult)
+data/'20 Int. (SNU-adult)
+data/'21 Ext. (SNUBH-child)
 results
 nohup.out
 lightning_logs/
