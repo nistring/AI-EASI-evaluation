@@ -1,5 +1,7 @@
 # Probabilistic Ordinal Segmentation for Assessing Eczema Area and Severity Index
 
+<img width="1890" height="1915" alt="image" src="https://github.com/user-attachments/assets/48dc7434-cebb-4cd4-a85d-8873934500a8" />
+
 [Preprint](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5205389)
 
 ### Abstract
