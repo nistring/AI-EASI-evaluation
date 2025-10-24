@@ -1,5 +1,7 @@
 # Probabilistic Ordinal Segmentation for Assessing Eczema Area and Severity Index
 
+[Preprint](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5205389)
+
 ### Abstract
 
 Assessing the severity of atopic dermatitis (AD) is critical for tailoring effective treatment options for patients. The widely used Eczema Area and Severity Index (EASI) allows dermatologists to evaluate AD severity. However, inter-observer variability in EASI scores can lead to discrepancies in clinical decision-making. To address this, we propose a novel approach using a probabilistic deep learning model to assess AD severity across the entire body.
