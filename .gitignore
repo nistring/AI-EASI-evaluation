@@ -170,3 +170,5 @@ scripts
 .vscode
 figure
 stat
+# Local manuscript drafts (never commit)
+menuscript/
